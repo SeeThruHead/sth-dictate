@@ -65,5 +65,9 @@ public func transcriptText(status: Int, body: Data) -> Result<String, EndpointEr
     guard let decoded = try? JSONDecoder().decode(TranscriptionResponse.self, from: body) else {
         return .failure(.invalid("Server answered without a JSON \"text\" field"))
     }
-    return .success(decoded.text)
+    return .success(oneParagraph(decoded.text))
+}
+
+public func oneParagraph(_ text: String) -> String {
+    text.split(whereSeparator: \.isWhitespace).joined(separator: " ")
 }

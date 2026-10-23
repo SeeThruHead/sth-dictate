@@ -22,5 +22,7 @@
     <true/>
     <key>NSMicrophoneUsageDescription</key>
     <string>SthDictate records your voice while dictation is on and sends it to your transcription server.</string>
+    <key>NSLocalNetworkUsageDescription</key>
+    <string>SthDictate sends recordings to the transcription server on your local network.</string>
 </dict>
 </plist>

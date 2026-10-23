@@ -11,7 +11,7 @@ final class Recorder {
     func start() -> Result<Void, EndpointError> {
         let input = engine.inputNode
         let format = input.outputFormat(forBus: 0)
-        guard format.sampleRate > 0, let converter = AVAudioConverter(from: format, to: target) else {
+        guard format.sampleRate > 0, let mono = AVAudioFormat(standardFormatWithSampleRate: format.sampleRate, channels: 1), let converter = AVAudioConverter(from: mono, to: target) else {
             return .failure(.invalid("No microphone input available"))
         }
         let current = lock.withLock {
@@ -21,7 +21,8 @@ final class Recorder {
         }
         input.removeTap(onBus: 0)
         input.installTap(onBus: 0, bufferSize: 4096, format: format) { [weak self] buffer, _ in
-            self?.append(self?.convert(buffer, with: converter) ?? [], generation: current)
+            let mixed = Recorder.mixDown(buffer, into: mono)
+            self?.append(mixed.flatMap { self?.convert($0, with: converter) } ?? [], generation: current)
         }
         engine.prepare()
         do {
@@ -47,6 +48,17 @@ final class Recorder {
             guard tapped == generation else { return }
             samples.append(contentsOf: chunk)
         }
+    }
+
+    private static func mixDown(_ buffer: AVAudioPCMBuffer, into mono: AVAudioFormat) -> AVAudioPCMBuffer? {
+        guard let channels = buffer.floatChannelData, let out = AVAudioPCMBuffer(pcmFormat: mono, frameCapacity: buffer.frameLength), let target = out.floatChannelData?[0] else { return nil }
+        let frames = Int(buffer.frameLength)
+        let count = Int(buffer.format.channelCount)
+        let energy = (0..<count).map { channel in (0..<frames).reduce(Float(0)) { $0 + channels[channel][$1] * channels[channel][$1] } }
+        let loudest = energy.indices.max { energy[$0] < energy[$1] } ?? 0
+        (0..<frames).forEach { target[$0] = channels[loudest][$0] }
+        out.frameLength = buffer.frameLength
+        return out
     }
 
     private func convert(_ buffer: AVAudioPCMBuffer, with converter: AVAudioConverter) -> [Float] {

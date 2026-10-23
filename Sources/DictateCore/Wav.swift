@@ -2,6 +2,19 @@ import Foundation
 
 public let sampleRate = 16_000
 
+public let shortestRecordingSeconds = 0.3
+
+public func tooShort(_ samples: [Float], sampleRate: Int = sampleRate) -> Bool {
+    Double(samples.count) < Double(sampleRate) * shortestRecordingSeconds
+}
+
+public func louder(_ samples: [Float], target: Float = 0.9, maxGain: Float = 20) -> [Float] {
+    let peak = samples.map(abs).max() ?? 0
+    guard peak > 0.001 else { return samples }
+    let gain = min(maxGain, target / peak)
+    return samples.map { $0 * gain }
+}
+
 public func pcm16(_ samples: [Float]) -> [Int16] {
     samples.map { Int16(max(-1, min(1, $0)) * Float(Int16.max)) }
 }

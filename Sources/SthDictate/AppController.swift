@@ -2,6 +2,9 @@ import AVFoundation
 import Cocoa
 import DictateCore
 import SwiftUI
+import os
+
+private let log = Logger(subsystem: "com.sth.dictate", category: "app")
 
 final class AppController: NSObject {
     private var settings = SettingsStore.load()
@@ -15,6 +18,7 @@ final class AppController: NSObject {
     private let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
     private let statusLine = NSMenuItem(title: "", action: nil, keyEquivalent: "")
     private var settingsWindow: NSWindow?
+    private var listening = false
     private lazy var keyMonitor = KeyMonitor { [weak self] event in self?.key(event) }
 
     func launch() {
@@ -31,21 +35,23 @@ final class AppController: NSObject {
         menu.addItem(withTitle: "Quit SthDictate", action: #selector(quit), keyEquivalent: "q").target = self
         statusItem.menu = menu
         AVCaptureDevice.requestAccess(for: .audio) { _ in }
-        if !Paster.hasPermission { Paster.requestPermission() }
         startKeyMonitor()
     }
 
+    private let waitingForInputMonitoring = "Allow SthDictate in Privacy & Security › Input Monitoring"
+
     private func startKeyMonitor() {
-        if keyMonitor.start() {
-            show("Ready: \(settings.hotkeyLabel) to dictate")
+        guard keyMonitor.hasPermission, keyMonitor.start() else {
+            if status != waitingForInputMonitoring { show(waitingForInputMonitoring) }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in self?.startKeyMonitor() }
             return
         }
-        keyMonitor.requestPermission()
-        show("Allow SthDictate in Privacy & Security › Input Monitoring")
-        DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in self?.startKeyMonitor() }
+        listening = true
+        show("Ready: \(settings.hotkeyLabel) to dictate")
     }
 
     private func key(_ event: KeyEvent) {
+        if case let .flagsChanged(keyCode, flags) = event { log.notice("flagsChanged key \(keyCode) flags \(String(flags, radix: 16), privacy: .public)") }
         guard !capturingHotkey else { return }
         let (next, signal) = tracker.step(event, hotkey: settings.hotkey)
         tracker = next
@@ -71,8 +77,7 @@ final class AppController: NSObject {
         case let .paste(text):
             lastTranscript = text
             copyLast.isEnabled = true
-            Paster.paste(text)
-            show("Pasted \(text.count) characters")
+            deliver(text)
         case let .report(message):
             show(message)
         }
@@ -89,7 +94,17 @@ final class AppController: NSObject {
     }
 
     private func transcribe(id: Int, samples: [Float]) {
-        let audio = wav(pcm16(samples))
+        let audio = wav(pcm16(louder(samples)))
+        let peak = samples.map(abs).max() ?? 0
+        log.notice("recorded \(Double(samples.count) / Double(DictateCore.sampleRate), format: .fixed(precision: 1))s, peak \(peak, format: .fixed(precision: 3))")
+        guard !tooShort(samples) else {
+            dispatch(.transcribed(id: id, text: ""))
+            show("Too short, nothing sent")
+            return
+        }
+        let cache = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0].appendingPathComponent("com.sth.dictate")
+        try? FileManager.default.createDirectory(at: cache, withIntermediateDirectories: true)
+        try? audio.write(to: cache.appendingPathComponent("last.wav"))
         let settings = settings
         show("Transcribing…")
         Task {
@@ -104,13 +119,22 @@ final class AppController: NSObject {
     }
 
     private func show(_ message: String) {
+        log.notice("status: \(message, privacy: .public)")
         status = message
         statusLine.title = message
         refreshIcon()
     }
 
+    private var iconSymbol: String {
+        if !listening { return "exclamationmark.triangle" }
+        if session.isRecording { return "waveform.circle.fill" }
+        if session.isTranscribing { return "ellipsis.circle" }
+
+        return "waveform"
+    }
+
     private func refreshIcon() {
-        let symbol = session.isRecording ? "mic.fill" : session.isTranscribing ? "ellipsis.circle" : "mic"
+        let symbol = iconSymbol
         let image = NSImage(systemSymbolName: symbol, accessibilityDescription: status)
         image?.isTemplate = !session.isRecording
         statusItem.button?.image = image
@@ -126,7 +150,9 @@ final class AppController: NSObject {
         )
         let window = settingsWindow ?? NSWindow(contentRect: .zero, styleMask: [.titled, .closable], backing: .buffered, defer: false)
         window.title = "SthDictate"
-        window.contentView = NSHostingView(rootView: view)
+        let hosting = NSHostingView(rootView: view)
+        window.contentView = hosting
+        window.setContentSize(hosting.fittingSize)
         window.isReleasedWhenClosed = false
         window.center()
         settingsWindow = window
@@ -139,6 +165,18 @@ final class AppController: NSObject {
         tracker = HotkeyTracker()
         SettingsStore.save(next)
         show("Ready: \(next.hotkeyLabel) to dictate")
+    }
+
+    private func deliver(_ text: String) {
+        guard Paster.hasPermission else {
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(text, forType: .string)
+            Paster.requestPermission()
+            show("Copied, not pasted: allow SthDictate in Accessibility to paste")
+            return
+        }
+        Paster.paste(text)
+        show("Pasted \(text.count) characters")
     }
 
     @objc private func copyLastTranscript() {

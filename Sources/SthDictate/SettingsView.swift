@@ -16,6 +16,7 @@ struct SettingsView: View {
     @State private var monitor: Any?
     @State private var testResult = ""
     @State private var testing = false
+    @State private var granted: [Permission: Bool] = [:]
 
     var body: some View {
         Form {
@@ -23,6 +24,22 @@ struct SettingsView: View {
             TextField("Model", text: $model, prompt: Text("optional"))
             LabeledContent("Hotkey") {
                 Button(capturing ? "Press a key…" : hotkeyLabel) { capturing ? stopCapture() : startCapture() }
+            }
+            Section("Permissions") {
+                ForEach(Permission.allCases) { permission in
+                    LabeledContent {
+                        if granted[permission] == true {
+                            Label("Granted", systemImage: "checkmark.circle.fill").foregroundStyle(.green)
+                        } else {
+                            Button("Grant…") { permission.grant() }
+                        }
+                    } label: {
+                        Text(permission.title)
+                        Text(permission.purpose).foregroundStyle(.secondary)
+                    }
+                }
+                Text("Grant opens System Settings with a small panel you drag SthDictate from.")
+                    .font(.caption).foregroundStyle(.secondary)
             }
             LabeledContent("Test") {
                 HStack {
@@ -34,6 +51,8 @@ struct SettingsView: View {
         .formStyle(.grouped)
         .frame(width: 440)
         .onAppear(perform: load)
+        .onAppear(perform: refreshPermissions)
+        .onReceive(Timer.publish(every: 1, on: .main, in: .common).autoconnect()) { _ in refreshPermissions() }
         .onDisappear(perform: stopCapture)
         .onChange(of: endpoint) { save() }
         .onChange(of: model) { save() }
@@ -46,6 +65,10 @@ struct SettingsView: View {
         model = settings.model
         hotkey = settings.hotkey
         hotkeyLabel = settings.hotkeyLabel
+    }
+
+    private func refreshPermissions() {
+        granted = Dictionary(uniqueKeysWithValues: Permission.allCases.map { ($0, $0.isGranted) })
     }
 
     private func save() {

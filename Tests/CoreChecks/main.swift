@@ -76,6 +76,8 @@ let multipartText = String(decoding: multipart(boundary: "B", audio: Data("WAV".
 let noModelText = String(decoding: multipart(boundary: "B", audio: Data("WAV".utf8), model: "").body, as: UTF8.self)
 let header = wav([0, 1, -1])
 
+func close(_ a: [Float], _ b: [Float]) -> Bool { a.count == b.count && zip(a, b).allSatisfy { abs($0 - $1) < 0.0001 } }
+
 let checks: [Check] = [
     check("right ⌘ press and release", signals([down, up], hotkey: rightCmd) == [.pressed, .released]),
     check("left ⌘ is not right ⌘", signals([.flagsChanged(keyCode: 55, flags: ModifierFlag.command | 0x08), .flagsChanged(keyCode: 55, flags: 0)], hotkey: rightCmd).isEmpty),
@@ -103,6 +105,11 @@ let checks: [Check] = [
     check("a repeated down without an up triggers once", doubleDown == [.pressed, .released]),
     check("a stray up before any down is ignored", strayUp == [.pressed, .released]),
     check("20 fast taps give 20 press and release pairs", fastFlutter.count == 40 && fastFlutter.enumerated().allSatisfy { $0.element == ($0.offset % 2 == 0 ? .pressed : .released) }),
+    check("whisper segments become one paragraph", (try? transcriptText(status: 200, body: Data(#"{"text":" Hello, my name is Shane.\n I do not want\n to shout.\n"}"#.utf8)).get()) == "Hello, my name is Shane. I do not want to shout."),
+    check("quiet audio is raised to near full scale", close(louder([0.1, -0.05]), [0.9, -0.45])),
+    check("very quiet audio is raised at most 20 times", close(louder([0.01]), [0.2])),
+    check("a recording under 0.3 s is too short to send", tooShort(Array(repeating: 0, count: 4_000)) && !tooShort(Array(repeating: 0, count: 5_000))),
+    check("silence is left alone", louder([0.0005, 0]) == [0.0005, 0]),
     check("hotkey names read naturally", hotkeyName(rightCmd, keyName: { _ in "?" }) == "Right ⌘" && hotkeyName(optionSpace, keyName: { _ in "Space" }) == "⌥Space"),
 ]
 
