@@ -4,7 +4,7 @@ A tiny macOS menu bar app for dictation against your own Whisper server.
 
 - Tap the hotkey (Right ⌘ by default) to start, tap again to stop, or hold and release. Taps register instantly, even right after stopping. A sound plays on start and stop, and the icon turns into a red waveform while recording.
 - The recording is sent to any OpenAI-compatible transcription endpoint (`/v1/audio/transcriptions`), and the text is pasted at your cursor as one paragraph.
-- Multi-input interfaces work: it records the system default input and uses whichever input channel is loudest, and quiet recordings are raised before sending.
+- Microphone menu: follow the system input, or pin one device (say a USB interface while Bluetooth headphones stay in music mode; AirPods take about 3 seconds to switch into headset mode on every press). On a multi-channel interface, use the loudest channel or pick one input. Quiet recordings are raised before sending.
 - Settings: endpoint, optional model name, hotkey, a Test button, and a Permissions section with a Grant button for each permission.
 
 ## Install

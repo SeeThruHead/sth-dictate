@@ -6,7 +6,7 @@ import os
 
 private let log = Logger(subsystem: "com.sth.dictate", category: "app")
 
-final class AppController: NSObject {
+final class AppController: NSObject, NSMenuDelegate {
     private var settings = SettingsStore.load()
     private var session = Session()
     private var tracker = HotkeyTracker()
@@ -17,9 +17,10 @@ final class AppController: NSObject {
     private let recorder = Recorder()
     private let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
     private let statusLine = NSMenuItem(title: "", action: nil, keyEquivalent: "")
+    private let microphoneMenu = NSMenu(title: "Microphone")
     private var settingsWindow: NSWindow?
     private var listening = false
-    private lazy var keyMonitor = KeyMonitor { [weak self] event in self?.key(event) }
+    private lazy var keyMonitor = KeyMonitor { [weak self] event, at in self?.key(event, at: at) }
 
     func launch() {
         let menu = NSMenu()
@@ -31,6 +32,11 @@ final class AppController: NSObject {
         copyLast.isEnabled = false
         menu.autoenablesItems = false
         menu.addItem(copyLast)
+        let microphoneItem = NSMenuItem(title: "Microphone", action: nil, keyEquivalent: "")
+        microphoneItem.submenu = microphoneMenu
+        microphoneMenu.delegate = self
+        microphoneMenu.autoenablesItems = false
+        menu.addItem(microphoneItem)
         menu.addItem(withTitle: "Settings…", action: #selector(openSettings), keyEquivalent: ",").target = self
         menu.addItem(withTitle: "Quit SthDictate", action: #selector(quit), keyEquivalent: "q").target = self
         statusItem.menu = menu
@@ -50,12 +56,12 @@ final class AppController: NSObject {
         show("Ready: \(settings.hotkeyLabel) to dictate")
     }
 
-    private func key(_ event: KeyEvent) {
-        if case let .flagsChanged(keyCode, flags) = event { log.notice("flagsChanged key \(keyCode) flags \(String(flags, radix: 16), privacy: .public)") }
+    private func key(_ event: KeyEvent, at: Double) {
+        if case let .flagsChanged(keyCode, flags) = event { log.notice("flagsChanged key \(keyCode) flags \(String(flags, radix: 16), privacy: .public) at \(at, format: .fixed(precision: 3)) uptime \(ProcessInfo.processInfo.systemUptime, format: .fixed(precision: 3))") }
         guard !capturingHotkey else { return }
         let (next, signal) = tracker.step(event, hotkey: settings.hotkey)
         tracker = next
-        signal.map { dispatch(.hotkey($0, at: ProcessInfo.processInfo.systemUptime)) }
+        signal.map { dispatch(.hotkey($0, at: at)) }
     }
 
     private func dispatch(_ action: Action) {
@@ -84,13 +90,9 @@ final class AppController: NSObject {
     }
 
     private func startCapture(_ id: Int) {
-        switch recorder.start() {
-        case .success:
-            NSSound(named: "Tink")?.play()
-            show("Listening…")
-        case let .failure(.invalid(message)):
-            dispatch(.transcriptionFailed(id: id, message: message))
-        }
+        recorder.start(microphone: settings.microphone, channel: settings.channel) { [weak self] message in self?.dispatch(.transcriptionFailed(id: id, message: message)) }
+        NSSound(named: "Tink")?.play()
+        show("Listening…")
     }
 
     private func transcribe(id: Int, samples: [Float]) {
@@ -183,6 +185,60 @@ final class AppController: NSObject {
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(lastTranscript, forType: .string)
         show("Copied last transcript")
+    }
+
+    func menuNeedsUpdate(_ menu: NSMenu) {
+        guard menu === microphoneMenu else { return }
+        menu.removeAllItems()
+        let follow = NSMenuItem(title: "Follow system input", action: #selector(chooseMicrophone(_:)), keyEquivalent: "")
+        follow.target = self
+        follow.state = settings.microphone == nil ? .on : .off
+        menu.addItem(follow)
+        menu.addItem(.separator())
+        Microphones.all().forEach { microphone in
+            let item = NSMenuItem(title: microphone.name, action: #selector(chooseMicrophone(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = microphone.uid
+            item.state = settings.microphone == microphone.uid ? .on : .off
+            menu.addItem(item)
+        }
+        channelItems().forEach(menu.addItem)
+        if let uid = settings.microphone, Microphones.device(uid: uid) == nil {
+            let missing = NSMenuItem(title: "Chosen microphone is not connected, using the system input", action: nil, keyEquivalent: "")
+            missing.isEnabled = false
+            menu.addItem(missing)
+        }
+    }
+
+    private func channelItems() -> [NSMenuItem] {
+        guard let uid = settings.microphone, let microphone = Microphones.all().first(where: { $0.uid == uid }), microphone.channels > 1 else { return [] }
+        let header = NSMenuItem(title: "Channel on \(microphone.name)", action: nil, keyEquivalent: "")
+        header.isEnabled = false
+        let loudest = channelItem("Loudest channel (automatic)", channel: nil)
+        let inputs = (0..<microphone.channels).map { channelItem("Input \($0 + 1)", channel: $0) }
+        return [.separator(), header, loudest] + inputs
+    }
+
+    private func channelItem(_ title: String, channel: Int?) -> NSMenuItem {
+        let item = NSMenuItem(title: title, action: #selector(chooseChannel(_:)), keyEquivalent: "")
+        item.target = self
+        item.representedObject = channel
+        item.state = settings.channel == channel ? .on : .off
+        return item
+    }
+
+    @objc private func chooseChannel(_ sender: NSMenuItem) {
+        let channel = sender.representedObject as? Int
+        settings = settings.with(channel: channel)
+        SettingsStore.save(settings)
+        show(channel.map { "Channel: Input \($0 + 1)" } ?? "Channel: loudest, chosen automatically")
+    }
+
+    @objc private func chooseMicrophone(_ sender: NSMenuItem) {
+        let uid = sender.representedObject as? String
+        settings = settings.with(microphone: uid)
+        SettingsStore.save(settings)
+        show(uid == nil ? "Microphone: follows the system input" : "Microphone: \(sender.title)")
     }
 
     @objc private func quit() {

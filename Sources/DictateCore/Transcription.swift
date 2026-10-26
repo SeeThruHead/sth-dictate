@@ -5,18 +5,30 @@ public struct DictateSettings: Codable, Equatable, Sendable {
     public let model: String
     public let hotkey: Hotkey
     public let hotkeyLabel: String
+    public let microphone: String?
+    public let channel: Int?
 
-    public init(endpoint: String, model: String, hotkey: Hotkey, hotkeyLabel: String) {
+    public init(endpoint: String, model: String, hotkey: Hotkey, hotkeyLabel: String, microphone: String? = nil, channel: Int? = nil) {
         self.endpoint = endpoint
         self.model = model
         self.hotkey = hotkey
         self.hotkeyLabel = hotkeyLabel
+        self.microphone = microphone
+        self.channel = channel
     }
 
     public static let initial = DictateSettings(endpoint: "http://192.168.0.149:8000/v1", model: "", hotkey: .rightCommand, hotkeyLabel: "Right ⌘")
 
     public func with(endpoint: String? = nil, model: String? = nil, hotkey: Hotkey? = nil, hotkeyLabel: String? = nil) -> DictateSettings {
-        DictateSettings(endpoint: endpoint ?? self.endpoint, model: model ?? self.model, hotkey: hotkey ?? self.hotkey, hotkeyLabel: hotkeyLabel ?? self.hotkeyLabel)
+        DictateSettings(endpoint: endpoint ?? self.endpoint, model: model ?? self.model, hotkey: hotkey ?? self.hotkey, hotkeyLabel: hotkeyLabel ?? self.hotkeyLabel, microphone: microphone, channel: channel)
+    }
+
+    public func with(microphone: String?) -> DictateSettings {
+        DictateSettings(endpoint: endpoint, model: model, hotkey: hotkey, hotkeyLabel: hotkeyLabel, microphone: microphone, channel: nil)
+    }
+
+    public func with(channel: Int?) -> DictateSettings {
+        DictateSettings(endpoint: endpoint, model: model, hotkey: hotkey, hotkeyLabel: hotkeyLabel, microphone: microphone, channel: channel)
     }
 }
 

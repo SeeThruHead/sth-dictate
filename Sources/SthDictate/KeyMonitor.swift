@@ -2,11 +2,11 @@ import Cocoa
 import DictateCore
 
 final class KeyMonitor {
-    private let onEvent: (KeyEvent) -> Void
+    private let onEvent: (KeyEvent, Double) -> Void
     private var tap: CFMachPort?
     private var source: CFRunLoopSource?
 
-    init(onEvent: @escaping (KeyEvent) -> Void) {
+    init(onEvent: @escaping (KeyEvent, Double) -> Void) {
         self.onEvent = onEvent
     }
 
@@ -37,7 +37,8 @@ final class KeyMonitor {
             tap.map { CGEvent.tapEnable(tap: $0, enable: true) }
             return
         }
-        keyEvent(type: type, event: event).map(onEvent)
+        let at = Double(event.timestamp) / 1_000_000_000
+        keyEvent(type: type, event: event).map { onEvent($0, at) }
     }
 
     private func keyEvent(type: CGEventType, event: CGEvent) -> KeyEvent? {
