@@ -20,7 +20,7 @@ final class AppController: NSObject, NSMenuDelegate {
     private let microphoneMenu = NSMenu(title: "Microphone")
     private var settingsWindow: NSWindow?
     private var listening = false
-    private var broadcastState: String?
+    private let broadcaster = StateBroadcast("com.sth.dictate")
     private lazy var keyMonitor = KeyMonitor { [weak self] event, at in self?.key(event, at: at) }
 
     func launch() {
@@ -145,15 +145,7 @@ final class AppController: NSObject, NSMenuDelegate {
     }
 
     private func broadcast() {
-        let state = stateName
-        guard state != broadcastState else { return }
-        broadcastState = state
-        DistributedNotificationCenter.default().postNotificationName(
-            Notification.Name("com.sth.dictate.state"),
-            object: nil,
-            userInfo: ["state": state],
-            deliverImmediately: true
-        )
+        broadcaster.publish(["state": stateName])
     }
 
     private func refreshIcon() {
