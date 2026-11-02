@@ -34,16 +34,9 @@ enum Transcriber {
 enum Paster {
     static func paste(_ text: String) {
         let board = NSPasteboard.general
-        let previous = board.string(forType: .string)
         board.clearContents()
         board.setString(text, forType: .string)
-        let ours = board.changeCount
         postCommandV()
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-            guard board.changeCount == ours, let previous else { return }
-            board.clearContents()
-            board.setString(previous, forType: .string)
-        }
     }
 
     static var hasPermission: Bool { AXIsProcessTrusted() }
