@@ -33,7 +33,7 @@ usage:
   sth-dictate test      send a second of silence to the endpoint and say how long it took
   sth-dictate --version
 
-settings: ~/.config/sth-dictate/settings.json (endpoint, model, hotkey, hotkey_label, microphone, sounds)";
+settings: ~/.config/sth-dictate/settings.json (endpoint, model, hotkey, hotkey_label, microphone, sounds, delivery, paste_keys)";
 
 fn home() -> PathBuf {
     std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default()
@@ -52,7 +52,12 @@ fn serve(settings: Settings) -> Result<(), String> {
         hotkey_label: settings.hotkey_label.clone(),
         microphone: Box::new(recorder::PipeWire { target: settings.microphone.clone() }),
         transcriber: Arc::new(whisper(&settings)),
-        desktop: Box::new(desktop::Wayland { sounds: settings.sounds_dir(&home()) }),
+        desktop: Box::new(desktop::Wayland {
+            sounds: settings.sounds_dir(&home()),
+            delivery: settings.delivery,
+            paste_keys: settings.paste_keys.clone(),
+            keyboard: desktop::Keyboard::create()?,
+        }),
         publish: Box::new(socket),
         inbox: sender,
     };

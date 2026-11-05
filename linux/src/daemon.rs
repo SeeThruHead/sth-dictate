@@ -64,7 +64,7 @@ impl Daemon {
             Command::StartCapture(_) => self.start_capture(ports),
             Command::StopCaptureAndTranscribe(id) => self.stop_and_transcribe(id, ports),
             Command::DiscardCapture(_) => self.discard_capture(),
-            Command::Paste(text) => self.paste(&text, ports),
+            Command::Paste(text) => self.deliver(&text, ports),
             Command::Report(message) => Daemon { message, ..self },
         }
     }
@@ -101,8 +101,8 @@ impl Daemon {
         Daemon { message: "Transcribing…".into(), ..daemon }
     }
 
-    fn paste(self, text: &str, ports: &Ports) -> Daemon {
-        let message = ports.desktop.paste(text).err().unwrap_or_default();
+    fn deliver(self, text: &str, ports: &Ports) -> Daemon {
+        let message = ports.desktop.deliver(text).err().unwrap_or_default();
         Daemon { message, ..self }
     }
 
@@ -186,7 +186,7 @@ mod tests {
     struct FakeDesk(Log, Result<(), String>);
 
     impl Desktop for FakeDesk {
-        fn paste(&self, text: &str) -> Result<(), String> {
+        fn deliver(&self, text: &str) -> Result<(), String> {
             self.0.note(format!("paste:{text}"));
             self.1.clone()
         }

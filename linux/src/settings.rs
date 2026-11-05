@@ -1,5 +1,7 @@
+use crate::desktop::{self, DEFAULT_APP, DEFAULT_PASTE, Delivery};
 use crate::hotkey::KEY_F18;
 use serde::Deserialize;
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 #[derive(Clone, Debug, Deserialize, PartialEq)]
@@ -11,6 +13,8 @@ pub struct Settings {
     pub hotkey_label: String,
     pub microphone: Option<String>,
     pub sounds: Option<PathBuf>,
+    pub delivery: Delivery,
+    pub paste_keys: BTreeMap<String, String>,
 }
 
 impl Default for Settings {
@@ -22,6 +26,8 @@ impl Default for Settings {
             hotkey_label: "Right ⌘".into(),
             microphone: None,
             sounds: None,
+            delivery: Delivery::Paste,
+            paste_keys: BTreeMap::from([(DEFAULT_APP.to_string(), DEFAULT_PASTE.to_string())]),
         }
     }
 }
@@ -32,7 +38,14 @@ impl Settings {
     }
 
     pub fn parse(text: &str, file: &Path) -> Result<Settings, String> {
-        serde_json::from_str(text).map_err(|error| format!("{} is not valid: {error}", file.display()))
+        let settings: Settings =
+            serde_json::from_str(text).map_err(|error| format!("{} is not valid: {error}", file.display()))?;
+        let broken =
+            settings.paste_keys.iter().find_map(|(app, combo)| desktop::key_codes(combo).err().map(|why| (app, why)));
+        match broken {
+            Some((app, why)) => Err(format!("{}: paste_keys for {app}: {why}", file.display())),
+            None => Ok(settings),
+        }
     }
 
     pub fn load(home: &Path) -> Result<Settings, String> {
@@ -53,6 +66,19 @@ mod tests {
     fn missing_fields_take_the_defaults() {
         let settings = Settings::parse(r#"{"model":"turbo"}"#, Path::new("s.json")).unwrap();
         assert_eq!(settings, Settings { model: Some("turbo".into()), ..Settings::default() });
+    }
+
+    #[test]
+    fn delivery_can_be_set_to_typing() {
+        let settings = Settings::parse(r#"{"delivery":"type"}"#, Path::new("s.json")).unwrap();
+        assert_eq!(settings.delivery, Delivery::Type);
+        assert_eq!(Settings::default().delivery, Delivery::Paste);
+    }
+
+    #[test]
+    fn paste_keys_are_checked_when_the_file_is_read() {
+        let error = Settings::parse(r#"{"paste_keys":{"wow.exe":"ctlr+v"}}"#, Path::new("s.json")).unwrap_err();
+        assert!(error.starts_with("s.json: paste_keys for wow.exe: \"ctlr+v\" has an unknown modifier"));
     }
 
     #[test]
