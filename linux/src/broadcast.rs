@@ -1,3 +1,4 @@
+use crate::pin::Target;
 use serde::Serialize;
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -21,6 +22,8 @@ pub struct Status {
     pub message: String,
     pub pinned: bool,
     pub pinned_to: String,
+    #[serde(skip)]
+    pub target: Option<Target>,
 }
 
 pub trait Publish: Send {
@@ -83,6 +86,14 @@ fn welcome(listeners: &Mutex<Listeners>, mut stream: UnixStream) {
     listeners.streams = streams.into_iter().chain([stream]).collect();
 }
 
+pub struct Publishers(pub Vec<Box<dyn Publish>>);
+
+impl Publish for Publishers {
+    fn publish(&self, status: &Status) {
+        self.0.iter().for_each(|publisher| publisher.publish(status));
+    }
+}
+
 impl Publish for Socket {
     fn publish(&self, status: &Status) {
         let Ok(mut listeners) = self.listeners.lock() else { return };
@@ -104,8 +115,13 @@ mod tests {
 
     #[test]
     fn status_is_one_json_line() {
-        let status =
-            Status { state: Phase::Streaming, message: "Listening…".into(), pinned: true, pinned_to: "Slack".into() };
+        let status = Status {
+            state: Phase::Streaming,
+            message: "Listening…".into(),
+            pinned: true,
+            pinned_to: "Slack".into(),
+            target: Some(Target::Herdr),
+        };
         assert_eq!(
             line(&status),
             "{\"state\":\"streaming\",\"message\":\"Listening…\",\"pinned\":true,\"pinned_to\":\"Slack\"}\n"

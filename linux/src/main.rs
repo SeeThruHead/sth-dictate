@@ -10,10 +10,11 @@ mod recorder;
 mod session;
 mod settings;
 mod transcription;
+mod tray;
 mod wav;
 mod windows;
 
-use broadcast::{Phase, Socket, Status};
+use broadcast::{Phase, Publish, Publishers, Socket, Status};
 use daemon::{Daemon, Input, Ports};
 use listening::Tuning;
 use pin::{PinChange, Target};
@@ -60,6 +61,11 @@ fn serve(settings: Settings) -> Result<(), String> {
     let (sender, inbox) = channel();
     let socket = Socket::bind(&broadcast::socket_path(), command_inbox(sender.clone()))?;
     keyboard::listen(settings.hotkey, keyboard_inbox(sender.clone()));
+    let tray: Vec<Box<dyn Publish>> =
+        tray::show(sender.clone()).map(|icon| vec![Box::new(icon) as Box<dyn Publish>]).unwrap_or_else(|message| {
+            eprintln!("{message}");
+            vec![]
+        });
     let pin_file = pin::file(&home());
     let pinned = pin::load(&pin_file);
     let microphone = || recorder::PipeWire { target: settings.microphone.clone() };
@@ -77,7 +83,7 @@ fn serve(settings: Settings) -> Result<(), String> {
             paste_keys: settings.paste_keys.clone(),
             keyboard: desktop::Keyboard::create()?,
         }),
-        publish: Box::new(socket),
+        publish: Box::new(Publishers(std::iter::once(Box::new(socket) as Box<dyn Publish>).chain(tray).collect())),
         remember_pin: Box::new(move |pin| pin::save(&pin_file, pin)),
         inbox: sender,
     };
@@ -111,6 +117,7 @@ fn stopped() -> String {
         message: "sth-dictate is not running".into(),
         pinned: false,
         pinned_to: String::new(),
+        target: None,
     })
 }
 

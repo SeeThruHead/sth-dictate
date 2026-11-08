@@ -173,11 +173,12 @@ impl Daemon {
     }
 
     pub fn status(&self, hotkey_label: &str) -> Status {
-        let pinned_to = self.pin.target().map(|target| target.label()).unwrap_or_default();
+        let target = self.pin.target();
+        let pinned_to = target.as_ref().map(|target| target.label()).unwrap_or_default();
         let pinned = self.pin.on;
         if self.devices == 0 {
             let message = format!("No keyboard sends {hotkey_label}");
-            return Status { state: Phase::Unavailable, message, pinned, pinned_to };
+            return Status { state: Phase::Unavailable, message, pinned, pinned_to, target };
         }
         let state = self.phase();
         let message = match (self.message.is_empty(), state.clone()) {
@@ -185,7 +186,7 @@ impl Daemon {
             (true, _) => ready(hotkey_label, &pinned_to),
             (false, _) => self.message.clone(),
         };
-        Status { state, message, pinned, pinned_to }
+        Status { state, message, pinned, pinned_to, target }
     }
 
     fn streaming_message(&self) -> String {
