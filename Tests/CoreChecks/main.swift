@@ -111,6 +111,8 @@ let checks: [Check] = [
     check("a recording under 0.3 s is too short to send", tooShort(Array(repeating: 0, count: 4_000)) && !tooShort(Array(repeating: 0, count: 5_000))),
     check("silence is left alone", louder([0.0005, 0]) == [0.0005, 0]),
     check("hotkey names read naturally", hotkeyName(rightCmd, keyName: { _ in "?" }) == "Right ⌘" && hotkeyName(optionSpace, keyName: { _ in "Space" }) == "⌥Space"),
+    check("the focused pane comes from herdr pane current", herdrPaneID(Data(#"{"id":"cli:pane:current","result":{"pane":{"focused":true,"pane_id":"wB:p1"}}}"#.utf8)) == "wB:p1" && herdrPaneID(Data(#"{"error":"no server"}"#.utf8)) == nil),
+    check("herdr is found in ~/.local/bin before Homebrew", herdrExecutable(home: "/Users/s", exists: { _ in true }) == "/Users/s/.local/bin/herdr" && herdrExecutable(home: "/Users/s", exists: { $0 == "/opt/homebrew/bin/herdr" }) == "/opt/homebrew/bin/herdr" && herdrExecutable(home: "/Users/s", exists: { _ in false }) == nil),
 ]
 
 checks.forEach { print("\($0.passed ? "ok  " : "FAIL") \($0.name)") }

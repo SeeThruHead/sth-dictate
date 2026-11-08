@@ -56,6 +56,37 @@ enum Paster {
     }
 }
 
+enum Herdr {
+    static func send(_ text: String) -> String? {
+        guard let herdr = herdrExecutable(home: NSHomeDirectory(), exists: FileManager.default.isExecutableFile(atPath:)) else { return "Herdr is not installed in ~/.local/bin or Homebrew" }
+        guard let pane = herdrPaneID(run(herdr, ["pane", "current"]).output) else { return "Herdr has no focused pane" }
+        let sent = run(herdr, ["pane", "send-text", pane, text])
+        return sent.status == 0 ? nil : "Herdr could not send to pane \(pane)"
+    }
+
+    private static func run(_ path: String, _ arguments: [String]) -> (status: Int32, output: Data) {
+        let process = Process()
+        let pipe = Pipe()
+        process.executableURL = URL(fileURLWithPath: path)
+        process.arguments = arguments
+        process.environment = ProcessInfo.processInfo.environment.filter { $0.key != "HERDR_PANE_ID" }
+        process.standardOutput = pipe
+        process.standardError = FileHandle.nullDevice
+        guard (try? process.run()) != nil else { return (-1, Data()) }
+        let output = pipe.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        return (process.terminationStatus, output)
+    }
+}
+
+enum PinStore {
+    private static let key = "pinToHerdr"
+
+    static func load() -> Bool { UserDefaults.standard.bool(forKey: key) }
+
+    static func save(_ pinned: Bool) { UserDefaults.standard.set(pinned, forKey: key) }
+}
+
 enum SettingsStore {
     private static let key = "settings"
 

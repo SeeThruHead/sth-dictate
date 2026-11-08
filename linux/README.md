@@ -6,7 +6,8 @@ The Linux version of SthDictate: a small Rust service for dictation against your
 - The recording goes to any OpenAI-compatible `/v1/audio/transcriptions` endpoint. The text arrives at your cursor as one paragraph, pasted or typed, as the `delivery` setting says. Pasting copies with `wl-copy`, then presses the app's paste keys on a virtual kernel keyboard (`/dev/uinput`), so they take the same path as your own keyboard and work in Wine games too. Quiet recordings are raised before sending, and recordings under 0.3 s are not sent.
 - Several recordings can be transcribing at once; they paste in the order you spoke them.
 - The service reads the hotkey straight from the kernel's input devices, so it needs no compositor binding and keeps working in fullscreen games. It rescans every 2 s, so a keyboard (or Toshy's virtual keyboard) that appears later is picked up.
-- State goes out on a Unix socket (`$XDG_RUNTIME_DIR/sth-dictate.sock`) as one JSON line per change: `{"state":"idle|recording|transcribing|unavailable","message":"..."}`. `sth-dictate watch` prints it and reconnects when the service restarts; the Omarchy bar module runs that.
+- Pinned to Herdr (`sth-dictate pin`), the text goes to the pane focused inside Herdr through `herdr pane send-text` instead of the cursor, so it reaches the agent you are looking at while a game keeps focus. The pin is kept in `~/.local/state/sth-dictate/pinned` across restarts.
+- State goes out on a Unix socket (`$XDG_RUNTIME_DIR/sth-dictate.sock`) as one JSON line per change: `{"state":"idle|recording|transcribing|unavailable","message":"...","pinned":false}`. A client may write `pin on`, `pin off` or `pin toggle` to it. `sth-dictate watch` prints it and reconnects when the service restarts; the Omarchy bar module runs that.
 
 ## Commands
 
@@ -14,6 +15,8 @@ The Linux version of SthDictate: a small Rust service for dictation against your
     sth-dictate watch     print the state as it changes
     sth-dictate status    print the state once
     sth-dictate test      send a second of silence to the endpoint and say how long it took
+    sth-dictate pin [on|off|toggle]
+                          send the text to the focused Herdr pane instead of the cursor
 
 ## Settings
 
@@ -34,14 +37,15 @@ The Linux version of SthDictate: a small Rust service for dictation against your
 
 ## Needs
 
-`pw-record` and `pw-play` (PipeWire), `wl-copy` (wl-clipboard), `hyprctl`, `wtype` for typing mode, read access to `/dev/input` (the `input` group) and write access to `/dev/uinput`.
+`pw-record` and `pw-play` (PipeWire), `wl-copy` (wl-clipboard), `hyprctl`, `herdr` when pinned, `wtype` for typing mode, read access to `/dev/input` (the `input` group) and write access to `/dev/uinput`.
 
 ## Install
 
-    cargo install --path linux --root ~/.local
-    cp linux/systemd/sth-dictate.service ~/.config/systemd/user/
-    systemctl --user daemon-reload
+    brew install seethruhead/tap/sth-dictate
+    systemctl --user link /home/linuxbrew/.linuxbrew/opt/sth-dictate/share/systemd/user/sth-dictate.service
     systemctl --user enable --now sth-dictate
+
+The formula builds from a `linux-v<version>` tag. To release one, bump `version` in `Cargo.toml`, tag `linux-v<version>`, push the tag, and point `Formula/sth-dictate.rb` in the tap at it with the new tarball's sha256.
 
 ## Build and test
 

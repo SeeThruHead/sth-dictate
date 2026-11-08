@@ -1,7 +1,8 @@
 use serde::Serialize;
-use std::io::Write;
+use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
+use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -17,6 +18,7 @@ pub enum Phase {
 pub struct Status {
     pub state: Phase,
     pub message: String,
+    pub pinned: bool,
 }
 
 pub trait Publish: Send {
@@ -43,17 +45,31 @@ pub struct Socket {
 }
 
 impl Socket {
-    pub fn bind(path: &Path) -> Result<Socket, String> {
+    pub fn bind(path: &Path, commands: Sender<String>) -> Result<Socket, String> {
         let _ = std::fs::remove_file(path);
         let listener =
             UnixListener::bind(path).map_err(|error| format!("Could not listen on {}: {error}", path.display()))?;
         let listeners: Arc<Mutex<Listeners>> = Arc::default();
         let accepting = listeners.clone();
         std::thread::spawn(move || {
-            listener.incoming().filter_map(Result::ok).for_each(|stream| welcome(&accepting, stream));
+            listener.incoming().filter_map(Result::ok).for_each(|stream| {
+                hear_commands(&stream, commands.clone());
+                welcome(&accepting, stream);
+            });
         });
         Ok(Socket { listeners })
     }
+}
+
+fn hear_commands(stream: &UnixStream, commands: Sender<String>) {
+    let Ok(reader) = stream.try_clone() else { return };
+    std::thread::spawn(move || {
+        BufReader::new(reader)
+            .lines()
+            .map_while(Result::ok)
+            .take_while(|line| commands.send(line.clone()).is_ok())
+            .for_each(drop);
+    });
 }
 
 fn welcome(listeners: &Mutex<Listeners>, mut stream: UnixStream) {
@@ -86,7 +102,7 @@ mod tests {
 
     #[test]
     fn status_is_one_json_line() {
-        let status = Status { state: Phase::Recording, message: "Listening…".into() };
-        assert_eq!(line(&status), "{\"state\":\"recording\",\"message\":\"Listening…\"}\n");
+        let status = Status { state: Phase::Recording, message: "Listening…".into(), pinned: true };
+        assert_eq!(line(&status), "{\"state\":\"recording\",\"message\":\"Listening…\",\"pinned\":true}\n");
     }
 }

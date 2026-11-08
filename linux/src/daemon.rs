@@ -1,5 +1,6 @@
 use crate::broadcast::{Phase, Publish, Status};
-use crate::desktop::{Desktop, Sound};
+use crate::desktop::{Desktop, Sound, Target};
+use crate::herdr::PinChange;
 use crate::hotkey::{self, Tracker};
 use crate::keyboard::Heard;
 use crate::recorder::{Capture, Microphone};
@@ -12,6 +13,7 @@ use std::sync::mpsc::Sender;
 pub enum Input {
     Heard(Heard),
     Transcribed(u64, Result<String, String>),
+    Pin(PinChange),
 }
 
 pub struct Ports {
@@ -21,6 +23,7 @@ pub struct Ports {
     pub transcriber: Arc<dyn Transcriber>,
     pub desktop: Box<dyn Desktop>,
     pub publish: Box<dyn Publish>,
+    pub remember_pin: Box<dyn Fn(bool)>,
     pub inbox: Sender<Input>,
 }
 
@@ -32,15 +35,21 @@ pub struct Daemon {
     devices: usize,
     message: String,
     shown: Option<Status>,
+    pinned: bool,
 }
 
 impl Daemon {
+    pub fn starting(pinned: bool) -> Daemon {
+        Daemon { pinned, ..Daemon::default() }
+    }
+
     pub fn handle(self, input: Input, ports: &Ports) -> Daemon {
         let next = match input {
             Input::Heard(Heard::Key(event)) => self.on_key(event, ports),
             Input::Heard(Heard::Devices(devices)) => Daemon { devices, ..self },
             Input::Transcribed(id, Ok(text)) => self.dispatch(Action::Transcribed(id, text), ports),
             Input::Transcribed(id, Err(message)) => self.dispatch(Action::TranscriptionFailed(id, message), ports),
+            Input::Pin(change) => self.pin(change, ports),
         };
         next.show(ports)
     }
@@ -101,19 +110,29 @@ impl Daemon {
         Daemon { message: "Transcribing…".into(), ..daemon }
     }
 
+    fn pin(self, change: PinChange, ports: &Ports) -> Daemon {
+        let pinned = change.apply(self.pinned);
+        (ports.remember_pin)(pinned);
+        Daemon { pinned, message: String::new(), ..self }
+    }
+
+    fn target(&self) -> Target {
+        if self.pinned { Target::Herdr } else { Target::Cursor }
+    }
+
     fn deliver(self, text: &str, ports: &Ports) -> Daemon {
-        let message = ports.desktop.deliver(text).err().unwrap_or_default();
+        let message = ports.desktop.deliver(text, self.target()).err().unwrap_or_default();
         Daemon { message, ..self }
     }
 
     pub fn status(&self, hotkey_label: &str) -> Status {
+        let pinned = self.pinned;
         if self.devices == 0 {
-            return Status { state: Phase::Unavailable, message: format!("No keyboard sends {hotkey_label}") };
+            return Status { state: Phase::Unavailable, message: format!("No keyboard sends {hotkey_label}"), pinned };
         }
         let state = phase(&self.session);
-        let message =
-            if self.message.is_empty() { format!("Ready: {hotkey_label} to dictate") } else { self.message.clone() };
-        Status { state, message }
+        let message = if self.message.is_empty() { ready(hotkey_label, pinned) } else { self.message.clone() };
+        Status { state, message, pinned }
     }
 
     fn show(self, ports: &Ports) -> Daemon {
@@ -124,6 +143,13 @@ impl Daemon {
         ports.publish.publish(&status);
         Daemon { shown: Some(status), ..self }
     }
+}
+
+fn ready(hotkey_label: &str, pinned: bool) -> String {
+    if pinned {
+        return format!("Ready: {hotkey_label} to dictate into Herdr");
+    }
+    format!("Ready: {hotkey_label} to dictate")
 }
 
 fn phase(session: &Session) -> Phase {
@@ -186,8 +212,12 @@ mod tests {
     struct FakeDesk(Log, Result<(), String>);
 
     impl Desktop for FakeDesk {
-        fn deliver(&self, text: &str) -> Result<(), String> {
-            self.0.note(format!("paste:{text}"));
+        fn deliver(&self, text: &str, target: Target) -> Result<(), String> {
+            let verb = match target {
+                Target::Cursor => "paste",
+                Target::Herdr => "herdr",
+            };
+            self.0.note(format!("{verb}:{text}"));
             self.1.clone()
         }
 
@@ -225,6 +255,10 @@ mod tests {
             transcriber: Arc::new(FakeTranscriber(transcript)),
             desktop: Box::new(FakeDesk(desktop.clone(), pasted)),
             publish: Box::new(FakePublish(shown.clone())),
+            remember_pin: Box::new({
+                let shown = shown.clone();
+                move |pinned| shown.note(format!("remembered:{pinned}"))
+            }),
             inbox: sender,
         };
         Rig { ports, inbox, desktop, shown }
@@ -287,7 +321,7 @@ mod tests {
         let daemon = listening(&rig).handle(key(KeyState::Down, 1.0), &rig.ports);
         assert_eq!(
             daemon.status("Right ⌘"),
-            Status { state: Phase::Recording, message: "Could not start pw-record".into() }
+            Status { state: Phase::Recording, message: "Could not start pw-record".into(), pinned: false }
         );
     }
 
@@ -303,6 +337,38 @@ mod tests {
         let rig = rig(Ok(vec![]), Ok("x".into()), Ok(()));
         Daemon::default().handle(Input::Heard(Heard::Devices(0)), &rig.ports);
         assert_eq!(rig.shown.entries(), ["Unavailable:No keyboard sends Right ⌘"]);
+    }
+
+    #[test]
+    fn pinned_text_goes_to_herdr_instead_of_the_cursor() {
+        let rig = rig(Ok(wav::silence(1.0)), Ok("hello agent".into()), Ok(()));
+        let pinned = listening(&rig).handle(Input::Pin(PinChange::On), &rig.ports);
+        deliver_transcript(hold(pinned, &rig), &rig);
+        assert_eq!(rig.desktop.entries(), ["Start", "Stop", "herdr:hello agent"]);
+    }
+
+    #[test]
+    fn pinning_is_remembered_and_shown() {
+        let rig = rig(Ok(vec![]), Ok("x".into()), Ok(()));
+        let pinned = listening(&rig).handle(Input::Pin(PinChange::Toggle), &rig.ports);
+        pinned.handle(Input::Pin(PinChange::Toggle), &rig.ports);
+        assert_eq!(
+            rig.shown.entries(),
+            [
+                "Idle:Ready: Right ⌘ to dictate",
+                "remembered:true",
+                "Idle:Ready: Right ⌘ to dictate into Herdr",
+                "remembered:false",
+                "Idle:Ready: Right ⌘ to dictate"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_daemon_can_start_pinned() {
+        let rig = rig(Ok(vec![]), Ok("x".into()), Ok(()));
+        let daemon = Daemon::starting(true).handle(Input::Heard(Heard::Devices(1)), &rig.ports);
+        assert!(daemon.status("Right ⌘").pinned);
     }
 
     #[test]

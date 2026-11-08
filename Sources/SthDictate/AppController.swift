@@ -14,6 +14,9 @@ final class AppController: NSObject, NSMenuDelegate {
     private var capturingHotkey = false
     private var lastTranscript = ""
     private let copyLast = NSMenuItem(title: "Copy Last Transcript", action: nil, keyEquivalent: "")
+    private let pinItem = NSMenuItem(title: "Pin to Herdr", action: nil, keyEquivalent: "")
+    private var pinned = PinStore.load()
+    private let herdrQueue = DispatchQueue(label: "com.sth.dictate.herdr")
     private let recorder = Recorder()
     private let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
     private let statusLine = NSMenuItem(title: "", action: nil, keyEquivalent: "")
@@ -33,6 +36,10 @@ final class AppController: NSObject, NSMenuDelegate {
         copyLast.isEnabled = false
         menu.autoenablesItems = false
         menu.addItem(copyLast)
+        pinItem.action = #selector(togglePin)
+        pinItem.target = self
+        pinItem.state = pinned ? .on : .off
+        menu.addItem(pinItem)
         let microphoneItem = NSMenuItem(title: "Microphone", action: nil, keyEquivalent: "")
         microphoneItem.submenu = microphoneMenu
         microphoneMenu.delegate = self
@@ -184,6 +191,7 @@ final class AppController: NSObject, NSMenuDelegate {
     }
 
     private func deliver(_ text: String) {
+        guard !pinned else { return sendToHerdr(text) }
         guard Paster.hasPermission else {
             NSPasteboard.general.clearContents()
             NSPasteboard.general.setString(text, forType: .string)
@@ -193,6 +201,20 @@ final class AppController: NSObject, NSMenuDelegate {
         }
         Paster.paste(text)
         show("Pasted \(text.count) characters")
+    }
+
+    private func sendToHerdr(_ text: String) {
+        herdrQueue.async {
+            let failure = Herdr.send(text)
+            DispatchQueue.main.async { self.show(failure ?? "Sent \(text.count) characters to Herdr") }
+        }
+    }
+
+    @objc private func togglePin() {
+        pinned.toggle()
+        PinStore.save(pinned)
+        pinItem.state = pinned ? .on : .off
+        show(pinned ? "Pinned: text goes to the focused Herdr pane" : "Not pinned: text is pasted at the cursor")
     }
 
     @objc private func copyLastTranscript() {

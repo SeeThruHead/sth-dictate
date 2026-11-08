@@ -6,6 +6,7 @@ A tiny macOS menu bar app for dictation against your own Whisper server.
 - The recording is sent to any OpenAI-compatible transcription endpoint (`/v1/audio/transcriptions`), and the text is pasted at your cursor as one paragraph.
 - Microphone menu: follow the system input, or pin one device (say a USB interface while Bluetooth headphones stay in music mode; AirPods take about 3 seconds to switch into headset mode on every press). On a multi-channel interface, use the loudest channel or pick one input. Quiet recordings are raised before sending.
 - Settings: endpoint, optional model name, hotkey, a Test button, and a Permissions section with a Grant button for each permission.
+- Pin to Herdr (menu): the text goes to the pane focused inside Herdr (`herdr pane send-text`) instead of being pasted, so it reaches the agent you are looking at even while another app has focus. Off, it pastes at the cursor as before.
 
 ## Install
 

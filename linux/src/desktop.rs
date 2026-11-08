@@ -1,3 +1,4 @@
+use crate::herdr;
 use evdev::uinput::VirtualDevice;
 use evdev::{AttributeSet, KeyCode, KeyEvent};
 use serde::Deserialize;
@@ -91,8 +92,14 @@ impl Keyboard {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Target {
+    Cursor,
+    Herdr,
+}
+
 pub trait Desktop: Send {
-    fn deliver(&self, text: &str) -> Result<(), String>;
+    fn deliver(&self, text: &str, target: Target) -> Result<(), String>;
     fn play(&self, sound: Sound);
 }
 
@@ -104,10 +111,11 @@ pub struct Wayland {
 }
 
 impl Desktop for Wayland {
-    fn deliver(&self, text: &str) -> Result<(), String> {
-        match self.delivery {
-            Delivery::Paste => self.paste(text),
-            Delivery::Type => wtype(&["--", text]),
+    fn deliver(&self, text: &str, target: Target) -> Result<(), String> {
+        match (target, self.delivery) {
+            (Target::Herdr, _) => herdr::send(text),
+            (Target::Cursor, Delivery::Paste) => self.paste(text),
+            (Target::Cursor, Delivery::Type) => wtype(&["--", text]),
         }
     }
 
