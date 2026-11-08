@@ -14,14 +14,16 @@ final class Recorder {
     private let lock = NSLock()
     private var samples: [Float] = []
     private var generation = 0
+    private var onChunk: (([Float]) -> Void)?
 
     private var device: AudioDeviceID?
     private var engineDevice: AudioDeviceID?
     private var channel: Int?
 
-    func start(microphone uid: String?, channel picked: Int?, onFailure: @escaping (String) -> Void) {
+    func start(microphone uid: String?, channel picked: Int?, onChunk: (([Float]) -> Void)? = nil, onFailure: @escaping (String) -> Void) {
         let current = lock.withLock {
             samples = []
+            self.onChunk = onChunk
             generation += 1
             return generation
         }
@@ -53,6 +55,7 @@ final class Recorder {
         }
         return lock.withLock {
             generation += 1
+            onChunk = nil
             return samples
         }
     }
@@ -121,10 +124,15 @@ final class Recorder {
     }
 
     private func append(_ chunk: [Float], generation tapped: Int) {
-        lock.withLock {
-            guard tapped == generation else { return }
-            samples.append(contentsOf: chunk)
+        let streaming: (([Float]) -> Void)? = lock.withLock {
+            guard tapped == generation else { return nil }
+            guard let onChunk else {
+                samples.append(contentsOf: chunk)
+                return nil
+            }
+            return onChunk
         }
+        streaming.map { handler in DispatchQueue.main.async { handler(chunk) } }
     }
 
     private static func mixDown(_ buffer: AVAudioPCMBuffer, into mono: AVAudioFormat, channel picked: Int?) -> AVAudioPCMBuffer? {

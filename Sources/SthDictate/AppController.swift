@@ -14,9 +14,13 @@ final class AppController: NSObject, NSMenuDelegate {
     private var capturingHotkey = false
     private var lastTranscript = ""
     private let copyLast = NSMenuItem(title: "Copy Last Transcript", action: nil, keyEquivalent: "")
-    private let pinItem = NSMenuItem(title: "Pin to Herdr", action: nil, keyEquivalent: "")
-    private var pinned = PinStore.load()
-    private let herdrQueue = DispatchQueue(label: "com.sth.dictate.herdr")
+    private let pinMenu = NSMenu(title: "Pin")
+    private var pin = PinStore.load()
+    private var lastHerdr = Route.herdrServer
+    private let deliveryQueue = DispatchQueue(label: "com.sth.dictate.delivery")
+    private var listener = Listener()
+    private var pendingAudio: [Float] = []
+    private var speaking = false
     private let recorder = Recorder()
     private let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
     private let statusLine = NSMenuItem(title: "", action: nil, keyEquivalent: "")
@@ -36,10 +40,12 @@ final class AppController: NSObject, NSMenuDelegate {
         copyLast.isEnabled = false
         menu.autoenablesItems = false
         menu.addItem(copyLast)
-        pinItem.action = #selector(togglePin)
-        pinItem.target = self
-        pinItem.state = pinned ? .on : .off
+        let pinItem = NSMenuItem(title: "Pin", action: nil, keyEquivalent: "")
+        pinItem.submenu = pinMenu
+        pinMenu.delegate = self
+        pinMenu.autoenablesItems = false
         menu.addItem(pinItem)
+        watchActivations()
         let microphoneItem = NSMenuItem(title: "Microphone", action: nil, keyEquivalent: "")
         microphoneItem.submenu = microphoneMenu
         microphoneMenu.delegate = self
@@ -85,13 +91,22 @@ final class AppController: NSObject, NSMenuDelegate {
             startCapture(id)
         case let .stopCaptureAndTranscribe(id):
             NSSound(named: "Pop")?.play()
-            transcribe(id: id, samples: recorder.stop())
+            transcribe(id: id, samples: recorder.stop(), streamed: false)
         case .discardCapture:
             _ = recorder.stop()
-        case let .paste(text):
+        case .startStreaming:
+            startStreaming()
+        case .stopStreaming:
+            _ = recorder.stop()
+            speaking = false
+            NSSound(named: "Pop")?.play()
+            show("Streaming off")
+        case let .transcribePiece(id, samples):
+            transcribe(id: id, samples: samples, streamed: true)
+        case let .paste(text, streamed):
             lastTranscript = text
             copyLast.isEnabled = true
-            deliver(text)
+            deliver(text, streamed: streamed)
         case let .report(message):
             show(message)
         }
@@ -103,11 +118,50 @@ final class AppController: NSObject, NSMenuDelegate {
         show("Listening…")
     }
 
-    private func transcribe(id: Int, samples: [Float]) {
+    private func startStreaming() {
+        listener = Listener()
+        pendingAudio = []
+        speaking = false
+        recorder.start(microphone: settings.microphone, channel: settings.channel, onChunk: { [weak self] chunk in self?.hear(chunk) }) { [weak self] message in self?.show(message) }
+        NSSound(named: "Tink")?.play()
+        show(streamingMessage)
+    }
+
+    private func hear(_ chunk: [Float]) {
+        guard session.isStreaming else { return }
+        let (cut, rest) = frames(pending: pendingAudio, chunk: chunk)
+        pendingAudio = rest
+        cut.forEach { frame in
+            let (next, heard) = listener.hear(frame, tuning: .standard)
+            listener = next
+            heard.map(onHeard)
+        }
+    }
+
+    private func onHeard(_ heard: Heard) {
+        switch heard {
+        case .speaking:
+            speaking = true
+        case .noise:
+            speaking = false
+        case let .piece(samples):
+            speaking = false
+            dispatch(.heard(samples))
+        }
+        show(streamingMessage)
+    }
+
+    private var streamingMessage: String {
+        if speaking { return "Streaming: hearing you…" }
+        if session.isTranscribing { return "Streaming: sending…" }
+        return "Streaming: each pause sends what you said"
+    }
+
+    private func transcribe(id: Int, samples: [Float], streamed: Bool) {
         let audio = wav(pcm16(louder(samples)))
         let peak = samples.map(abs).max() ?? 0
         log.notice("recorded \(Double(samples.count) / Double(DictateCore.sampleRate), format: .fixed(precision: 1))s, peak \(peak, format: .fixed(precision: 3))")
-        guard !tooShort(samples) else {
+        guard streamed || !tooShort(samples) else {
             dispatch(.transcribed(id: id, text: ""))
             show("Too short, nothing sent")
             return
@@ -116,12 +170,12 @@ final class AppController: NSObject, NSMenuDelegate {
         try? FileManager.default.createDirectory(at: cache, withIntermediateDirectories: true)
         try? audio.write(to: cache.appendingPathComponent("last.wav"))
         let settings = settings
-        show("Transcribing…")
+        show(streamed ? streamingMessage : "Transcribing…")
         Task {
             let result = await Transcriber.transcribe(audio, settings: settings)
             await MainActor.run {
                 switch result {
-                case let .success(text): self.dispatch(.transcribed(id: id, text: text))
+                case let .success(text): self.dispatch(.transcribed(id: id, text: streamed && isFiller(text) ? "" : text))
                 case let .failure(.invalid(message)): self.dispatch(.transcriptionFailed(id: id, message: message))
                 }
             }
@@ -137,6 +191,7 @@ final class AppController: NSObject, NSMenuDelegate {
 
     private var iconSymbol: String {
         if !listening { return "exclamationmark.triangle" }
+        if session.isStreaming { return speaking ? "waveform.circle.fill" : "dot.radiowaves.left.and.right" }
         if session.isRecording { return "waveform.circle.fill" }
         if session.isTranscribing { return "ellipsis.circle" }
 
@@ -145,6 +200,7 @@ final class AppController: NSObject, NSMenuDelegate {
 
     private var stateName: String {
         if !listening { return "unavailable" }
+        if session.isStreaming { return "streaming" }
         if session.isRecording { return "recording" }
         if session.isTranscribing { return "transcribing" }
 
@@ -152,16 +208,17 @@ final class AppController: NSObject, NSMenuDelegate {
     }
 
     private func broadcast() {
-        broadcaster.publish(["state": stateName])
+        broadcaster.publish(["state": stateName, "pinned_to": pin.target?.label ?? ""])
     }
 
     private func refreshIcon() {
         broadcast()
         let symbol = iconSymbol
         let image = NSImage(systemSymbolName: symbol, accessibilityDescription: status)
-        image?.isTemplate = !session.isRecording
+        let hot = session.isRecording || speaking
+        image?.isTemplate = !hot && !session.isStreaming
         statusItem.button?.image = image
-        statusItem.button?.contentTintColor = session.isRecording ? .systemRed : nil
+        statusItem.button?.contentTintColor = hot ? .systemRed : session.isStreaming ? .systemBlue : nil
     }
 
     @objc private func openSettings() {
@@ -190,8 +247,8 @@ final class AppController: NSObject, NSMenuDelegate {
         show("Ready: \(next.hotkeyLabel) to dictate")
     }
 
-    private func deliver(_ text: String) {
-        guard !pinned else { return sendToHerdr(text) }
+    private func deliver(_ text: String, streamed: Bool) {
+        if let target = pin.target { return sendToPin(text, target: target) }
         guard Paster.hasPermission else {
             NSPasteboard.general.clearContents()
             NSPasteboard.general.setString(text, forType: .string)
@@ -200,21 +257,71 @@ final class AppController: NSObject, NSMenuDelegate {
             return
         }
         Paster.paste(text)
-        show("Pasted \(text.count) characters")
+        if streamed { DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) { Paster.pressReturn() } }
+        show(session.isStreaming ? streamingMessage : "Pasted \(text.count) characters")
     }
 
-    private func sendToHerdr(_ text: String) {
-        herdrQueue.async {
-            let failure = Herdr.send(text)
-            DispatchQueue.main.async { self.show(failure ?? "Sent \(text.count) characters to Herdr") }
+    private func sendToPin(_ text: String, target: PinTarget) {
+        let lastHerdr = lastHerdr
+        deliveryQueue.async {
+            let failure = Deliver.send(text, to: target, lastHerdr: lastHerdr)
+            DispatchQueue.main.async { self.show(failure ?? (self.session.isStreaming ? self.streamingMessage : "Sent \(text.count) characters to \(target.label)")) }
         }
     }
 
-    @objc private func togglePin() {
-        pinned.toggle()
-        PinStore.save(pinned)
-        pinItem.state = pinned ? .on : .off
-        show(pinned ? "Pinned: text goes to the focused Herdr pane" : "Not pinned: text is pasted at the cursor")
+    private func watchActivations() {
+        NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.didActivateApplicationNotification, object: nil, queue: .main) { [weak self] note in
+            guard let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication else { return }
+            self?.deliveryQueue.async {
+                let route = Deliver.routeFor(app)
+                guard route != .keys else { return }
+                DispatchQueue.main.async { self?.lastHerdr = route }
+            }
+        }
+    }
+
+    private var frontApp: NSRunningApplication? {
+        NSWorkspace.shared.frontmostApplication.flatMap { $0.bundleIdentifier == Bundle.main.bundleIdentifier ? nil : $0 }
+    }
+
+    private func setPin(_ next: Pin) {
+        pin = next
+        PinStore.save(next)
+        refreshIcon()
+        show(next.target.map { "Pinned to \($0.label): dictation goes there, then Enter" } ?? "Not pinned: dictation pastes at the cursor")
+    }
+
+    @objc private func pinFrontApp(_ sender: NSMenuItem) {
+        guard let target = sender.representedObject as? Data, let chosen = try? JSONDecoder().decode(PinTarget.self, from: target) else { return }
+        setPin(Pin(on: true, chosen: chosen))
+    }
+
+    @objc private func pinHerdr() {
+        setPin(Pin(on: true, chosen: .herdr))
+    }
+
+    @objc private func unpin() {
+        setPin(Pin(on: false, chosen: pin.chosen))
+    }
+
+    private func pinItems() -> [NSMenuItem] {
+        let header = NSMenuItem(title: pin.target.map { "Pinned to \($0.label)" } ?? "Not pinned: pasting at the cursor", action: nil, keyEquivalent: "")
+        header.isEnabled = false
+        let front = frontApp.flatMap { app -> NSMenuItem? in
+            guard let bundleId = app.bundleIdentifier, let name = app.localizedName else { return nil }
+            let item = NSMenuItem(title: "Pin to \(name)", action: #selector(pinFrontApp(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = try? JSONEncoder().encode(PinTarget.app(bundleId: bundleId, name: name))
+            item.state = pin.target == .app(bundleId: bundleId, name: name) ? .on : .off
+            return item
+        }
+        let herdr = NSMenuItem(title: "Pin to Herdr (its focused pane)", action: #selector(pinHerdr), keyEquivalent: "")
+        herdr.target = self
+        herdr.state = pin.target == .herdr ? .on : .off
+        let off = NSMenuItem(title: "Unpin", action: #selector(unpin), keyEquivalent: "")
+        off.target = self
+        off.isEnabled = pin.on
+        return [header, .separator()] + (front.map { [$0] } ?? []) + [herdr, off]
     }
 
     @objc private func copyLastTranscript() {
@@ -224,6 +331,11 @@ final class AppController: NSObject, NSMenuDelegate {
     }
 
     func menuNeedsUpdate(_ menu: NSMenu) {
+        if menu === pinMenu {
+            menu.removeAllItems()
+            pinItems().forEach(menu.addItem)
+            return
+        }
         guard menu === microphoneMenu else { return }
         menu.removeAllItems()
         let follow = NSMenuItem(title: "Follow system input", action: #selector(chooseMicrophone(_:)), keyEquivalent: "")

@@ -4,15 +4,19 @@ mod desktop;
 mod herdr;
 mod hotkey;
 mod keyboard;
+mod listening;
+mod pin;
 mod recorder;
 mod session;
 mod settings;
 mod transcription;
 mod wav;
+mod windows;
 
 use broadcast::{Phase, Socket, Status};
 use daemon::{Daemon, Input, Ports};
-use herdr::PinChange;
+use listening::Tuning;
+use pin::{PinChange, Target};
 use settings::Settings;
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
@@ -27,18 +31,22 @@ const RECONNECT: Duration = Duration::from_secs(1);
 const ANSWER: Duration = Duration::from_millis(500);
 
 const USAGE: &str = "sth-dictate: dictation against your own Whisper server. Tap the hotkey to start and again to stop,
-or hold it and let go; the text is pasted at your cursor as one paragraph.
+or hold it and let go; the text is pasted at your cursor as one paragraph. Double tap to stream: every pause
+sends what you said, with Enter. Double tap again to stop.
 
 usage:
   sth-dictate serve     listen for the hotkey, record, transcribe and paste (run by the systemd user service)
   sth-dictate watch     print the state as one JSON line per change, reconnecting when the service restarts
   sth-dictate status    print the current state once
   sth-dictate test      send a second of silence to the endpoint and say how long it took
-  sth-dictate pin [on|off|toggle]
-                        send dictated text to the focused Herdr pane instead of the cursor (toggle by default)
+  sth-dictate pin       pin the window in front: dictation goes into it, then Enter, while you stay elsewhere
+  sth-dictate pin herdr pin Herdr: the focused pane of the Herdr you used last
+  sth-dictate pin off   stop pinning; dictation pastes at the cursor again
+  sth-dictate pin on    pin again, to the last pinned window or Herdr
   sth-dictate --version
 
-settings: ~/.config/sth-dictate/settings.json (endpoint, model, hotkey, hotkey_label, microphone, sounds, delivery, paste_keys)";
+settings: ~/.config/sth-dictate/settings.json (endpoint, model, hotkey, hotkey_label, microphone, sounds, delivery,
+paste_keys, pause_seconds, voice_level)";
 
 fn home() -> PathBuf {
     std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default()
@@ -52,21 +60,25 @@ fn serve(settings: Settings) -> Result<(), String> {
     let (sender, inbox) = channel();
     let socket = Socket::bind(&broadcast::socket_path(), command_inbox(sender.clone()))?;
     keyboard::listen(settings.hotkey, keyboard_inbox(sender.clone()));
-    let pin_file = herdr::pin_file(&home());
-    let pinned = pin_file.exists();
+    let pin_file = pin::file(&home());
+    let pinned = pin::load(&pin_file);
+    let microphone = || recorder::PipeWire { target: settings.microphone.clone() };
     let ports = Ports {
         hotkey: settings.hotkey,
         hotkey_label: settings.hotkey_label.clone(),
-        microphone: Box::new(recorder::PipeWire { target: settings.microphone.clone() }),
+        microphone: Box::new(microphone()),
+        ear: Box::new(microphone()),
+        tuning: Tuning::new(settings.pause_seconds, settings.voice_level),
         transcriber: Arc::new(whisper(&settings)),
         desktop: Box::new(desktop::Wayland {
+            home: home(),
             sounds: settings.sounds_dir(&home()),
             delivery: settings.delivery,
             paste_keys: settings.paste_keys.clone(),
             keyboard: desktop::Keyboard::create()?,
         }),
         publish: Box::new(socket),
-        remember_pin: Box::new(move |pinned| herdr::remember(&pin_file, pinned)),
+        remember_pin: Box::new(move |pin| pin::save(&pin_file, pin)),
         inbox: sender,
     };
     inbox.iter().fold(Daemon::starting(pinned), |daemon, input| daemon.handle(input, &ports));
@@ -86,38 +98,57 @@ fn command_inbox(inbox: Sender<Input>) -> Sender<String> {
     std::thread::spawn(move || {
         from_socket
             .iter()
-            .filter_map(|line| herdr::command(&line))
-            .take_while(|change| inbox.send(Input::Pin(*change)).is_ok())
+            .filter_map(|line| pin::command(&line))
+            .take_while(|change| inbox.send(Input::Pin(change.clone())).is_ok())
             .for_each(drop)
     });
     command
 }
 
 fn stopped() -> String {
-    broadcast::line(&Status { state: Phase::Unavailable, message: "sth-dictate is not running".into(), pinned: false })
+    broadcast::line(&Status {
+        state: Phase::Unavailable,
+        message: "sth-dictate is not running".into(),
+        pinned: false,
+        pinned_to: String::new(),
+    })
+}
+
+fn window_in_front() -> Result<Target, String> {
+    let window = windows::active().ok_or("No window is in front to pin")?;
+    Ok(Target::Window { address: window.address, class: window.class, title: window.title })
+}
+
+fn pin_change(word: &str) -> Result<PinChange, String> {
+    match word {
+        "" | "here" => window_in_front().map(PinChange::To),
+        "herdr" => Ok(PinChange::To(Target::Herdr)),
+        "on" => Ok(PinChange::On),
+        "off" => Ok(PinChange::Off),
+        "toggle" => Ok(PinChange::Toggle),
+        other => Err(format!("pin takes nothing (the window in front), herdr, on, off or toggle, not \"{other}\"")),
+    }
 }
 
 fn pin(word: &str) -> Result<(), String> {
-    let change = PinChange::parse(word).ok_or_else(|| format!("pin takes on, off or toggle, not \"{word}\""))?;
+    let change = pin_change(word)?;
     let mut stream =
         UnixStream::connect(broadcast::socket_path()).map_err(|_| "sth-dictate is not running".to_string())?;
     stream
-        .write_all(format!("pin {}\n", change.word()).as_bytes())
+        .write_all(change.line().as_bytes())
         .and_then(|_| stream.set_read_timeout(Some(ANSWER)))
         .map_err(|error| format!("Could not reach sth-dictate: {error}"))?;
-    let pinned = BufReader::new(stream)
+    let status = BufReader::new(stream)
         .lines()
         .map_while(Result::ok)
         .last()
         .and_then(|line| serde_json::from_str::<serde_json::Value>(&line).ok())
-        .and_then(|status| status.get("pinned").and_then(serde_json::Value::as_bool))
-        .ok_or_else(|| "sth-dictate did not say whether it is pinned".to_string())?;
-    let said = if pinned {
-        "Pinned to Herdr: text goes to the focused Herdr pane\n"
-    } else {
-        "Not pinned: text is pasted at the cursor\n"
-    };
-    print_now(said)
+        .ok_or_else(|| "sth-dictate did not answer".to_string())?;
+    let pinned_to = status.get("pinned_to").and_then(serde_json::Value::as_str).unwrap_or_default();
+    if pinned_to.is_empty() {
+        return print_now("Not pinned: dictation pastes at the cursor\n");
+    }
+    print_now(&format!("Pinned to {pinned_to}: dictation goes there, then Enter\n"))
 }
 
 fn watch() -> Result<(), String> {

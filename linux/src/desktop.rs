@@ -1,4 +1,6 @@
 use crate::herdr;
+use crate::pin::Target;
+use crate::windows::{self, Window};
 use evdev::uinput::VirtualDevice;
 use evdev::{AttributeSet, KeyCode, KeyEvent};
 use serde::Deserialize;
@@ -14,6 +16,8 @@ pub const DEFAULT_APP: &str = "default";
 pub const DEFAULT_PASTE: &str = "shift+Insert";
 
 const KEY_GAP: Duration = Duration::from_millis(12);
+const SETTLE: Duration = Duration::from_millis(60);
+const HERDR_APP: &str = "herdr-app";
 const KEYBOARD_KEYS: std::ops::RangeInclusive<u16> = 1..=248;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -92,18 +96,19 @@ impl Keyboard {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub enum Target {
-    Cursor,
-    Herdr,
+#[derive(Clone, Debug, PartialEq)]
+pub enum Destination {
+    Cursor { enter: bool },
+    Pinned(Target),
 }
 
 pub trait Desktop: Send {
-    fn deliver(&self, text: &str, target: Target) -> Result<(), String>;
+    fn deliver(&self, text: &str, destination: Destination) -> Result<(), String>;
     fn play(&self, sound: Sound);
 }
 
 pub struct Wayland {
+    pub home: PathBuf,
     pub sounds: PathBuf,
     pub delivery: Delivery,
     pub paste_keys: BTreeMap<String, String>,
@@ -111,11 +116,11 @@ pub struct Wayland {
 }
 
 impl Desktop for Wayland {
-    fn deliver(&self, text: &str, target: Target) -> Result<(), String> {
-        match (target, self.delivery) {
-            (Target::Herdr, _) => herdr::send(text),
-            (Target::Cursor, Delivery::Paste) => self.paste(text),
-            (Target::Cursor, Delivery::Type) => wtype(&["--", text]),
+    fn deliver(&self, text: &str, destination: Destination) -> Result<(), String> {
+        match destination {
+            Destination::Cursor { enter } => self.at_cursor(text, enter),
+            Destination::Pinned(Target::Herdr) => self.to_herdr(text),
+            Destination::Pinned(Target::Window { address, .. }) => self.to_window(text, &address),
         }
     }
 
@@ -133,22 +138,99 @@ impl Desktop for Wayland {
     }
 }
 
-impl Wayland {
-    fn paste(&self, text: &str) -> Result<(), String> {
-        copy(text)?;
-        let combo = combo_for(&focused_class(), &self.paste_keys);
-        self.keyboard.press(&key_codes(combo)?)
-    }
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Route {
+    HerdrServer,
+    HerdrApp,
+    Keys,
 }
 
-fn focused_class() -> String {
-    Command::new("hyprctl")
-        .args(["activewindow", "-j"])
-        .output()
-        .ok()
-        .and_then(|output| serde_json::from_slice::<serde_json::Value>(&output.stdout).ok())
-        .and_then(|window| window.get("class").and_then(serde_json::Value::as_str).map(str::to_string))
-        .unwrap_or_default()
+pub fn route(window: &Window, runs_herdr: bool) -> Route {
+    if window.class == HERDR_APP {
+        return Route::HerdrApp;
+    }
+    if runs_herdr {
+        return Route::HerdrServer;
+    }
+    Route::Keys
+}
+
+pub fn last_used_herdr(windows: &[Window], runs_herdr: impl Fn(&Window) -> bool) -> Route {
+    windows
+        .iter()
+        .filter(|window| window.class == HERDR_APP || runs_herdr(window))
+        .min_by_key(|window| window.focus_history)
+        .map_or(Route::HerdrServer, |window| route(window, runs_herdr(window)))
+}
+
+pub fn shortcut_of(combo: &str) -> Result<(String, u16), String> {
+    let codes = key_codes(combo)?;
+    let key = codes.last().map(|code| code.code()).ok_or_else(|| format!("\"{combo}\" names no key"))?;
+    let parts: Vec<&str> = combo.split('+').map(str::trim).collect();
+    let mods: Vec<String> =
+        parts.split_last().map_or(vec![], |(_, mods)| mods.iter().map(|m| m.to_uppercase()).collect());
+    Ok((mods.join(" "), key))
+}
+
+pub fn blocked_by_x11(target: &Window, front: Option<&Window>) -> bool {
+    target.xwayland && front.is_some_and(|front| front.xwayland && front.address != target.address)
+}
+
+impl Wayland {
+    fn at_cursor(&self, text: &str, enter: bool) -> Result<(), String> {
+        match self.delivery {
+            Delivery::Paste => self.paste(text)?,
+            Delivery::Type => wtype(&["--", text])?,
+        }
+        if !enter {
+            return Ok(());
+        }
+        self.keyboard.press(&[KeyCode::KEY_ENTER])
+    }
+
+    fn paste(&self, text: &str) -> Result<(), String> {
+        copy(text)?;
+        let class = windows::active().map(|window| window.class).unwrap_or_default();
+        self.keyboard.press(&key_codes(combo_for(&class, &self.paste_keys))?)
+    }
+
+    fn send_by(&self, route: Route, text: &str, window: Option<&Window>) -> Result<(), String> {
+        match (route, window) {
+            (Route::HerdrServer, _) => herdr::send_to_server(&self.home, text),
+            (Route::HerdrApp, _) => herdr::send_to_app(&self.home, text),
+            (Route::Keys, Some(window)) => self.keys_into(window, text),
+            (Route::Keys, None) => Err("No window is pinned".into()),
+        }
+    }
+
+    fn to_herdr(&self, text: &str) -> Result<(), String> {
+        let processes = windows::parents();
+        let route = last_used_herdr(&windows::all(), |window| windows::runs(&processes, window.pid, "herdr"));
+        self.send_by(route, text, None)
+    }
+
+    fn to_window(&self, text: &str, address: &str) -> Result<(), String> {
+        let window = windows::all()
+            .into_iter()
+            .find(|window| window.address == address)
+            .ok_or("The pinned window is closed: pin another one")?;
+        let runs_herdr = windows::runs(&windows::parents(), window.pid, "herdr");
+        self.send_by(route(&window, runs_herdr), text, Some(&window))
+    }
+
+    fn keys_into(&self, window: &Window, text: &str) -> Result<(), String> {
+        if blocked_by_x11(window, windows::active().as_ref()) {
+            return Err(format!(
+                "{} can't take text while another X11 app (the game) is in front, so nothing was sent",
+                window.class
+            ));
+        }
+        copy(text)?;
+        let (mods, key) = shortcut_of(combo_for(&window.class, &self.paste_keys))?;
+        windows::send_shortcut(&window.address, &mods, key)?;
+        std::thread::sleep(SETTLE);
+        windows::send_shortcut(&window.address, "", KeyCode::KEY_ENTER.code())
+    }
 }
 
 fn wtype(args: &[&str]) -> Result<(), String> {
@@ -199,5 +281,46 @@ mod tests {
         assert_eq!(combo_for("WoW.exe", &paste_keys), "ctrl+v");
         assert_eq!(combo_for("kitty", &paste_keys), "shift+Insert");
         assert_eq!(combo_for("kitty", &keys(&[])), DEFAULT_PASTE);
+    }
+
+    fn window(class: &str, history: i64, xwayland: bool) -> Window {
+        Window {
+            address: format!("0x{history}"),
+            class: class.into(),
+            focus_history: history,
+            xwayland,
+            ..Window::default()
+        }
+    }
+
+    #[test]
+    fn herdr_windows_route_to_their_own_server_and_others_get_keys() {
+        assert_eq!(route(&window("herdr-app", 0, false), false), Route::HerdrApp);
+        assert_eq!(route(&window("kitty", 0, false), true), Route::HerdrServer);
+        assert_eq!(route(&window("Slack", 0, false), false), Route::Keys);
+    }
+
+    #[test]
+    fn pinned_to_herdr_means_whichever_herdr_was_used_last() {
+        let windows = [window("kitty", 3, false), window("herdr-app", 1, false), window("Slack", 0, false)];
+        assert_eq!(last_used_herdr(&windows, |window| window.class == "kitty"), Route::HerdrApp);
+        let kitty_last = [window("kitty", 1, false), window("herdr-app", 4, false)];
+        assert_eq!(last_used_herdr(&kitty_last, |window| window.class == "kitty"), Route::HerdrServer);
+        assert_eq!(last_used_herdr(&[], |_| false), Route::HerdrServer);
+    }
+
+    #[test]
+    fn a_paste_combo_becomes_hyprland_mods_and_a_key_code() {
+        assert_eq!(shortcut_of("shift+Insert").unwrap(), ("SHIFT".into(), KeyCode::KEY_INSERT.code()));
+        assert_eq!(shortcut_of("ctrl+shift+v").unwrap(), ("CTRL SHIFT".into(), KeyCode::KEY_V.code()));
+        assert_eq!(shortcut_of("v").unwrap(), (String::new(), KeyCode::KEY_V.code()));
+    }
+
+    #[test]
+    fn an_x11_window_is_never_typed_into_while_another_x11_app_is_in_front() {
+        let game = window("wow.exe", 0, true);
+        assert!(blocked_by_x11(&window("discord", 2, true), Some(&game)));
+        assert!(!blocked_by_x11(&window("Slack", 2, false), Some(&game)));
+        assert!(!blocked_by_x11(&window("discord", 2, true), Some(&window("kitty", 0, false))));
     }
 }

@@ -15,6 +15,8 @@ pub struct Settings {
     pub sounds: Option<PathBuf>,
     pub delivery: Delivery,
     pub paste_keys: BTreeMap<String, String>,
+    pub pause_seconds: f64,
+    pub voice_level: f64,
 }
 
 impl Default for Settings {
@@ -28,6 +30,8 @@ impl Default for Settings {
             sounds: None,
             delivery: Delivery::Paste,
             paste_keys: BTreeMap::from([(DEFAULT_APP.to_string(), DEFAULT_PASTE.to_string())]),
+            pause_seconds: 1.0,
+            voice_level: 150.0,
         }
     }
 }

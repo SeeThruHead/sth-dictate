@@ -11,6 +11,7 @@ pub enum Phase {
     Idle,
     Recording,
     Transcribing,
+    Streaming,
     Unavailable,
 }
 
@@ -19,6 +20,7 @@ pub struct Status {
     pub state: Phase,
     pub message: String,
     pub pinned: bool,
+    pub pinned_to: String,
 }
 
 pub trait Publish: Send {
@@ -102,7 +104,11 @@ mod tests {
 
     #[test]
     fn status_is_one_json_line() {
-        let status = Status { state: Phase::Recording, message: "Listening…".into(), pinned: true };
-        assert_eq!(line(&status), "{\"state\":\"recording\",\"message\":\"Listening…\",\"pinned\":true}\n");
+        let status =
+            Status { state: Phase::Streaming, message: "Listening…".into(), pinned: true, pinned_to: "Slack".into() };
+        assert_eq!(
+            line(&status),
+            "{\"state\":\"streaming\",\"message\":\"Listening…\",\"pinned\":true,\"pinned_to\":\"Slack\"}\n"
+        );
     }
 }

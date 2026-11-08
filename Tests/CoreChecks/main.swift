@@ -55,19 +55,44 @@ func kinds(_ effects: [Effect]) -> [String] {
         case let .startCapture(id): "start\(id)"
         case let .stopCaptureAndTranscribe(id): "stop\(id)"
         case let .discardCapture(id): "discard\(id)"
-        case let .paste(text): "paste:\(text)"
+        case .startStreaming: "stream-on"
+        case .stopStreaming: "stream-off"
+        case let .transcribePiece(id, _): "piece\(id)"
+        case let .paste(text, streamed): streamed ? "send:\(text)" : "paste:\(text)"
         case let .report(message): "report:\(message)"
         }
     }
 }
 
-let burst = play(taps([0, 0.03, 0.06, 0.09, 0.12, 0.15]))
+let burst = play(taps([0, 0.5, 1.0, 1.5, 2.0, 2.5]))
 let stopThenInstantStart = play(taps([0, 3, 3.02]))
 let instantTap = play(taps([0, 2], width: 0.001))
 let releaseAndPressSameInstant = play([.hotkey(.pressed, at: 0), .hotkey(.released, at: 0.05), .hotkey(.pressed, at: 2), .hotkey(.released, at: 2.0), .hotkey(.pressed, at: 2.0), .hotkey(.released, at: 2.0)])
-let lateResultsAfterBurst = play(taps([0, 0.03, 0.06, 0.09, 0.12, 0.15]) + [
+let lateResultsAfterBurst = play(taps([0, 0.5, 1.0, 1.5, 2.0, 2.5]) + [
     .transcribed(id: 2, text: "three"), .transcribed(id: 1, text: "two"), .transcribed(id: 0, text: "one"),
 ])
+let doubleTap = play(taps([0, 0.2], width: 0.05))
+let doubleTapOff = play(taps([5, 5.2], width: 0.05), from: doubleTap.0)
+let singleTapWhileStreaming = play(taps([5, 6], width: 0.05), from: doubleTap.0)
+let streamedPieces = play([.heard([1]), .heard([2]), .transcribed(id: 2, text: "second"), .transcribed(id: 1, text: "first")], from: doubleTap.0)
+let heardWhenNotStreaming = play([.heard([1])])
+
+func tone(_ level: Float) -> [Float] { (0..<listeningFrame).map { $0 % 2 == 0 ? level : -level } }
+func listen(_ frames: [[Float]], tuning: Tuning = Tuning(pauseSeconds: 0.3, voiceLevel: 150.0 / 32767.0)) -> [Heard] {
+    frames.reduce((Listener(), [Heard]())) { acc, frame in
+        let (next, heard) = acc.0.hear(frame, tuning: tuning)
+        return (next, acc.1 + (heard.map { [$0] } ?? []))
+    }.1
+}
+let quietFrame = tone(10.0 / 32767.0)
+let loudFrame = tone(2000.0 / 32767.0)
+let sentence = listen(Array(repeating: quietFrame, count: 20) + Array(repeating: loudFrame, count: 20) + Array(repeating: quietFrame, count: 10))
+let click = listen(Array(repeating: quietFrame, count: 10) + Array(repeating: loudFrame, count: 4) + Array(repeating: quietFrame, count: 15))
+let roomNoise = listen(Array(repeating: tone(120.0 / 32767.0), count: 200))
+let framed = frames(pending: [1, 2], chunk: Array(repeating: 0, count: 1000))
+let psOutput = "    1     0 /sbin/launchd\n  500     1 /Applications/kitty.app/Contents/MacOS/kitty\n  600   500 /bin/zsh\n  700   600 /Users/s/.local/bin/herdr\n  800     1 /Applications/Google Chrome.app/Contents/MacOS/Google Chrome\n"
+let running = processes(fromPS: psOutput)
+
 let doubleDown = signals([down, down, up, up], hotkey: rightCmd)
 let strayUp = signals([up, down, up], hotkey: rightCmd)
 let fastFlutter = signals(Array(repeating: [down, up], count: 20).flatMap { $0 }, hotkey: rightCmd)
@@ -88,8 +113,8 @@ let checks: [Check] = [
     check("using ⌘ as a shortcut mid-dictation keeps recording", shortcutMidDictation.1 == [.startCapture(id: 0)] && shortcutMidDictation.0.isRecording),
     check("using ⌘ as a shortcut on the first press discards", shortcutAtStart.1 == [.startCapture(id: 0), .discardCapture(id: 0)] && !shortcutAtStart.0.isRecording),
     check("a new tap right after stopping starts a new recording", restartWhileTranscribing.1 == [.startCapture(id: 0), .stopCaptureAndTranscribe(id: 0), .startCapture(id: 1)] && restartWhileTranscribing.0.isTranscribing),
-    check("results paste in the order spoken, trimmed", outOfOrder.1.filter { if case .paste = $0 { true } else { false } } == [.paste("first"), .paste("second")]),
-    check("a failure is reported and later results still paste", failureKeepsOrder.1.suffix(2) == [.report("down"), .paste("second")]),
+    check("results paste in the order spoken, trimmed", outOfOrder.1.filter { if case .paste = $0 { true } else { false } } == [.paste("first", streamed: false), .paste("second", streamed: false)]),
+    check("a failure is reported and later results still paste", failureKeepsOrder.1.suffix(2) == [.report("down"), .paste("second", streamed: false)]),
     check("empty transcripts paste nothing", reduce(Session(nextId: 1), .transcribed(id: 0, text: "  ")).1.isEmpty),
     check("wav header is 16 kHz mono PCM", header.count == 50 && String(data: header.prefix(4), encoding: .ascii) == "RIFF" && Array(header[24..<28]) == [0x80, 0x3e, 0, 0] && Array(header[44..<50]) == [0, 0, 1, 0, 0xff, 0xff]),
     check("pcm clamps and scales", pcm16([2, -2, 0]) == [Int16.max, -Int16.max, 0]),
@@ -97,7 +122,17 @@ let checks: [Check] = [
     check("garbage endpoint is rejected", (try? transcriptionURL("not a url").get()) == nil),
     check("multipart carries audio and optional model", multipartText.contains("name=\"model\"\r\n\r\nturbo") && multipartText.contains("filename=\"audio.wav\"\r\nContent-Type: audio/wav\r\n\r\nWAV\r\n") && multipartText.hasSuffix("--B--\r\n") && !noModelText.contains("name=\"model\"")),
     check("transcript needs success and a text field", (try? transcriptText(status: 200, body: Data(#"{"text":"hi"}"#.utf8)).get()) == "hi" && (try? transcriptText(status: 500, body: Data("boom".utf8)).get()) == nil && (try? transcriptText(status: 200, body: Data("{}".utf8)).get()) == nil),
-    check("six taps 30 ms apart give three separate recordings", kinds(burst.1) == ["start0", "stop0", "start1", "stop1", "start2", "stop2"] && !burst.0.isRecording),
+    check("taps half a second apart give separate recordings", kinds(burst.1) == ["start0", "stop0", "start1", "stop1", "start2", "stop2"] && !burst.0.isRecording),
+    check("a double tap turns streaming on and drops the tap recording", kinds(doubleTap.1) == ["start0", "discard0", "stream-on"] && doubleTap.0.isStreaming && !doubleTap.0.isRecording),
+    check("a second double tap turns streaming off", kinds(doubleTapOff.1) == ["stream-off"] && !doubleTapOff.0.isStreaming),
+    check("a single tap while streaming does nothing", singleTapWhileStreaming.1.isEmpty && singleTapWhileStreaming.0.isStreaming),
+    check("speech heard while streaming is sent in order", kinds(streamedPieces.1) == ["piece1", "piece2", "send:first", "send:second"] && streamedPieces.0.streamed.isEmpty),
+    check("speech heard when not streaming is dropped", heardWhenNotStreaming.1.isEmpty),
+    check("a pause after speech sends it with a little before and after", sentence.count == 2 && sentence[0] == .speaking && { if case let .piece(samples) = sentence[1] { return samples.count == 32 * listeningFrame }; return false }()),
+    check("a short click is noise", click == [.speaking, .noise]),
+    check("room noise never starts speech", roomNoise.isEmpty),
+    check("audio is cut into 30 ms frames with the rest kept", framed.frames.count == 2 && framed.rest.count == 42 && framed.frames[0].prefix(2) == [1, 2]),
+    check("whisper filler heard in silence is recognised", isFiller(" Thank you. ") && isFiller("you") && isFiller("...") && !isFiller("thank you, now restart the stack")),
     check("a tap 20 ms after stopping starts a new recording", kinds(stopThenInstantStart.1) == ["start0", "stop0", "start1"] && stopThenInstantStart.0.isRecording),
     check("a 1 ms tap still counts", kinds(instantTap.1) == ["start0", "stop0"]),
     check("release and next press in the same instant both register", kinds(releaseAndPressSameInstant.1) == ["start0", "stop0", "start1"]),
@@ -112,6 +147,11 @@ let checks: [Check] = [
     check("silence is left alone", louder([0.0005, 0]) == [0.0005, 0]),
     check("hotkey names read naturally", hotkeyName(rightCmd, keyName: { _ in "?" }) == "Right ⌘" && hotkeyName(optionSpace, keyName: { _ in "Space" }) == "⌥Space"),
     check("the focused pane comes from herdr pane current", herdrPaneID(Data(#"{"id":"cli:pane:current","result":{"pane":{"focused":true,"pane_id":"wB:p1"}}}"#.utf8)) == "wB:p1" && herdrPaneID(Data(#"{"error":"no server"}"#.utf8)) == nil),
+    check("an agent in the focused pane is prompted by name", herdrAgent(inPane: "wB:p1", agents: Data(#"{"result":{"agents":[{"name":"homelab","pane_id":"w1:p1"},{"name":"chief","pane_id":"wB:p1"}]}}"#.utf8)) == "chief"),
+    check("the Herdr app sends to its focused pane's terminal, or its agent", herdrAppTerminal(status: Data(#"{"focused_pane":"p9","agent":"t5"}"#.utf8), listing: Data(#"{"spaces":[{"tabs":[{"terminals":[{"pane":"p1","terminal":"t2"},{"pane":"p9","terminal":"t7"}]}]}]}"#.utf8)) == "t7" && herdrAppTerminal(status: Data(#"{"focused_pane":null,"agent":"t5"}"#.utf8), listing: Data("{}".utf8)) == "t5"),
+    check("a terminal runs herdr when herdr descends from it", runs("herdr", under: 500, in: running) && !runs("herdr", under: 800, in: running) && running.last?.name == "Google Chrome"),
+    check("the Herdr app, a Herdr terminal and other apps each get their route", route(executable: "/Users/s/Applications/Herdr.app/Contents/MacOS/Herdr", runsHerdr: false) == .herdrApp && route(executable: "/Applications/kitty.app/Contents/MacOS/kitty", runsHerdr: true) == .herdrServer && route(executable: "/Applications/Slack.app/Contents/MacOS/Slack", runsHerdr: false) == .keys),
+    check("a pin is kept as JSON and read back", (try? JSONDecoder().decode(PinTarget.self, from: JSONEncoder().encode(PinTarget.app(bundleId: "com.tinyspeck.slackmacgap", name: "Slack")))) == .app(bundleId: "com.tinyspeck.slackmacgap", name: "Slack")),
     check("herdr is found in ~/.local/bin before Homebrew", herdrExecutable(home: "/Users/s", exists: { _ in true }) == "/Users/s/.local/bin/herdr" && herdrExecutable(home: "/Users/s", exists: { $0 == "/opt/homebrew/bin/herdr" }) == "/opt/homebrew/bin/herdr" && herdrExecutable(home: "/Users/s", exists: { _ in false }) == nil),
 ]
 

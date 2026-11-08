@@ -1,6 +1,6 @@
 [package]
 name = "sth-dictate"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 description = "Dictation against your own Whisper server, for Linux: hold or tap a key, speak, and the text is pasted at your cursor"
 license = "MIT"
