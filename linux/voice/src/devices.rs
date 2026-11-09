@@ -1,4 +1,4 @@
-use crate::hotkey::{self, EVENT_SIZE, KeyEvent};
+use crate::keys::{self, EVENT_SIZE, KeyEvent};
 use std::collections::BTreeSet;
 use std::fs::File;
 use std::io::Read;
@@ -18,7 +18,11 @@ pub enum Heard {
 pub fn carries_key(device: &Path, code: u16) -> bool {
     let name = device.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default();
     let capabilities = std::fs::read_to_string(format!("/sys/class/input/{name}/device/capabilities/key"));
-    capabilities.is_ok_and(|bits| hotkey::has_key(&bits, code))
+    capabilities.is_ok_and(|bits| keys::has_key(&bits, code))
+}
+
+fn carries_any(device: &Path, codes: &[u16]) -> bool {
+    codes.iter().any(|code| carries_key(device, *code))
 }
 
 fn event_devices() -> BTreeSet<PathBuf> {
@@ -33,14 +37,14 @@ fn event_devices() -> BTreeSet<PathBuf> {
         .unwrap_or_default()
 }
 
-pub fn listen(code: u16, heard: Sender<Heard>) {
+pub fn listen(codes: Vec<u16>, heard: Sender<Heard>) {
     let reading: Arc<Mutex<BTreeSet<PathBuf>>> = Arc::default();
     std::thread::spawn(move || {
         loop {
             let fresh: Vec<PathBuf> = event_devices()
                 .into_iter()
                 .filter(|device| !reading.lock().is_ok_and(|reading| reading.contains(device)))
-                .filter(|device| carries_key(device, code))
+                .filter(|device| carries_any(device, &codes))
                 .collect();
             fresh.into_iter().for_each(|device| read_device(device, reading.clone(), heard.clone()));
             let count = reading.lock().map(|reading| reading.len()).unwrap_or(0);
@@ -59,7 +63,7 @@ fn read_device(device: PathBuf, reading: Arc<Mutex<BTreeSet<PathBuf>>>, heard: S
     }
     std::thread::spawn(move || {
         records(file)
-            .flat_map(|record| hotkey::decode_events(&record))
+            .flat_map(|record| keys::decode_events(&record))
             .take_while(|event| heard.send(Heard::Key(*event)).is_ok())
             .for_each(drop);
         if let Ok(mut set) = reading.lock() {

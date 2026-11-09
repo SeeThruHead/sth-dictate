@@ -68,7 +68,7 @@ impl Drop for Listening {
 }
 
 impl PipeWire {
-    fn record(&self) -> Result<Child, String> {
+    pub fn record(&self) -> Result<Child, String> {
         let rate = wav::SAMPLE_RATE.to_string();
         let target = self.target.iter().flat_map(|target| ["--target", target.as_str()]);
         let args =
@@ -83,7 +83,7 @@ impl PipeWire {
     }
 }
 
-fn frames(mut stdout: impl Read) -> impl Iterator<Item = Vec<i16>> {
+pub fn frames(mut stdout: impl Read) -> impl Iterator<Item = Vec<i16>> {
     std::iter::from_fn(move || {
         let mut bytes = [0u8; FRAME * 2];
         stdout.read_exact(&mut bytes).ok().map(|_| wav::samples_from_bytes(&bytes))

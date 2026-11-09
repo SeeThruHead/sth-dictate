@@ -3,16 +3,14 @@ mod daemon;
 mod desktop;
 mod herdr;
 mod hotkey;
-mod keyboard;
-mod listening;
 mod pin;
-mod recorder;
 mod session;
 mod settings;
-mod transcription;
 mod tray;
-mod wav;
 mod windows;
+
+use sth_voice::devices as keyboard;
+use sth_voice::{listening, recorder, transcription, wav};
 
 use broadcast::{Phase, Publish, Publishers, Socket, Status};
 use daemon::{Daemon, Input, Ports};
@@ -60,7 +58,7 @@ fn whisper(settings: &Settings) -> Whisper {
 fn serve(settings: Settings) -> Result<(), String> {
     let (sender, inbox) = channel();
     let socket = Socket::bind(&broadcast::socket_path(), command_inbox(sender.clone()))?;
-    keyboard::listen(settings.hotkey, keyboard_inbox(sender.clone()));
+    keyboard::listen(vec![settings.hotkey], keyboard_inbox(sender.clone()));
     let tray: Vec<Box<dyn Publish>> =
         tray::show(sender.clone()).map(|icon| vec![Box::new(icon) as Box<dyn Publish>]).unwrap_or_else(|message| {
             eprintln!("{message}");
@@ -81,7 +79,7 @@ fn serve(settings: Settings) -> Result<(), String> {
             sounds: settings.sounds_dir(&home()),
             delivery: settings.delivery,
             paste_keys: settings.paste_keys.clone(),
-            keyboard: desktop::Keyboard::create()?,
+            keyboard: desktop::Keyboard::create("sth-dictate keyboard")?,
         }),
         publish: Box::new(Publishers(std::iter::once(Box::new(socket) as Box<dyn Publish>).chain(tray).collect())),
         remember_pin: Box::new(move |pin| pin::save(&pin_file, pin)),

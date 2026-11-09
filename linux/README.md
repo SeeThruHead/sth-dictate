@@ -52,5 +52,7 @@ The formula builds from a `linux-v<version>` tag. To release one, bump `version`
 
 ## Build and test
 
-    cargo test
-    cargo clippy --all-targets
+    cargo test --workspace
+    cargo clippy --workspace --all-targets
+
+The `voice` crate (sth-voice) holds what any voice tool here needs: recording through PipeWire, pause detection, the Whisper client, reading keys from the kernel's input devices, and a virtual keyboard that types US-layout text. sth-wow-chat (its own repo) uses it as a git dependency on this repo.

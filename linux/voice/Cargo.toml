@@ -1,0 +1,13 @@
+[package]
+name = "sth-voice"
+version = "0.1.0"
+edition = "2024"
+description = "Recording, pause detection, a Whisper client, key listening and a virtual keyboard, shared by sth-dictate and sth-wow-chat"
+license = "MIT"
+publish = false
+
+[dependencies]
+evdev = "0.13"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+ureq = { version = "3", default-features = false }

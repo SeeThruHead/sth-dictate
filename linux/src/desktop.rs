@@ -1,24 +1,21 @@
 use crate::herdr;
 use crate::pin::Target;
 use crate::windows::{self, Window};
-use evdev::uinput::VirtualDevice;
-use evdev::{AttributeSet, KeyCode, KeyEvent};
+use evdev::KeyCode;
 use serde::Deserialize;
 use std::collections::BTreeMap;
 use std::io::Write;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::str::FromStr;
-use std::sync::Mutex;
 use std::time::Duration;
+pub use sth_voice::typing::Keyboard;
 
 pub const DEFAULT_APP: &str = "default";
 pub const DEFAULT_PASTE: &str = "shift+Insert";
 
-const KEY_GAP: Duration = Duration::from_millis(12);
 const SETTLE: Duration = Duration::from_millis(60);
 const HERDR_APP: &str = "herdr-app";
-const KEYBOARD_KEYS: std::ops::RangeInclusive<u16> = 1..=248;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Sound {
@@ -69,31 +66,6 @@ pub fn combo_for<'a>(class: &str, paste_keys: &'a BTreeMap<String, String>) -> &
         .find(|(app, _)| app.eq_ignore_ascii_case(class))
         .or_else(|| paste_keys.get_key_value(DEFAULT_APP))
         .map_or(DEFAULT_PASTE, |(_, combo)| combo.as_str())
-}
-
-pub struct Keyboard(Mutex<VirtualDevice>);
-
-impl Keyboard {
-    pub fn create() -> Result<Keyboard, String> {
-        let keys: AttributeSet<KeyCode> = KEYBOARD_KEYS.map(KeyCode::new).collect();
-        VirtualDevice::builder()
-            .and_then(|builder| builder.name("sth-dictate keyboard").with_keys(&keys))
-            .and_then(|builder| builder.build())
-            .map(|device| Keyboard(Mutex::new(device)))
-            .map_err(|error| format!("Could not create the paste keyboard on /dev/uinput: {error}"))
-    }
-
-    fn press(&self, codes: &[KeyCode]) -> Result<(), String> {
-        let mut device = self.0.lock().map_err(|_| "The paste keyboard is unusable".to_string())?;
-        let downs = codes.iter().map(|code| (*code, 1));
-        let ups = codes.iter().rev().map(|code| (*code, 0));
-        downs.chain(ups).try_for_each(|(code, value)| {
-            std::thread::sleep(KEY_GAP);
-            device
-                .emit(&[*KeyEvent::new(code, value)])
-                .map_err(|error| format!("Could not press the paste keys: {error}"))
-        })
-    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
